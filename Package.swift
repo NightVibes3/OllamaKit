@@ -27,6 +27,13 @@ let package = Package(
                 "Alamofire",
                 "SwiftyJSON"
             ],
+            path: "Sources/OllamaKit",
+            exclude: [],
+            resources: [
+                .process("Assets.xcassets"),
+                .copy("Info.plist"),
+                .copy("OllamaKit.entitlements")
+            ],
             swiftSettings: [
                 .enableExperimentalFeature("StrictConcurrency")
             ]
