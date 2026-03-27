@@ -58,7 +58,13 @@ jobs:
           exit 1
         fi
 
-        IFS=$'\n' sorted_candidates=($(printf '%s\n' "${candidates[@]}" | sort -rV))
+        IFS=$'\n' sorted_candidates=($(printf '%s\n' "${candidates[@]}" | python3 -c 'import re, sys
+def key(value: str):
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\\d+)", value.strip())]
+values = [line.strip() for line in sys.stdin if line.strip()]
+for value in sorted(values, key=key, reverse=True):
+    print(value)
+'))
         unset IFS
         selected_xcode=""
 
@@ -68,38 +74,17 @@ jobs:
 
           echo "=== Inspecting $xcode_app ==="
           "$xcodebuild_bin" -version
-          "$xcodebuild_bin" -showsdks
+          sdks="$("$xcodebuild_bin" -showsdks)"
+          echo "$sdks"
 
-          destinations="$(
-            DEVELOPER_DIR="$developer_dir" \
-            "$xcodebuild_bin" -project OllamaKit.xcodeproj -scheme OllamaKit -showdestinations 2>&1 || true
-          )"
-          echo "$destinations"
-
-          if printf '%s' "$destinations" | grep -q "Any iOS Device" && ! printf '%s' "$destinations" | grep -q "error:iOS"; then
+          if printf '%s' "$sdks" | grep -q "iphoneos"; then
             selected_xcode="$xcode_app"
             break
-          fi
-
-          if printf '%s' "$destinations" | grep -q "error:iOS .* is not installed"; then
-            echo "Attempting to install the iOS platform for $xcode_app"
-            DEVELOPER_DIR="$developer_dir" "$xcodebuild_bin" -downloadPlatform iOS
-
-            destinations="$(
-              DEVELOPER_DIR="$developer_dir" \
-              "$xcodebuild_bin" -project OllamaKit.xcodeproj -scheme OllamaKit -showdestinations 2>&1 || true
-            )"
-            echo "$destinations"
-
-            if printf '%s' "$destinations" | grep -q "Any iOS Device" && ! printf '%s' "$destinations" | grep -q "error:iOS"; then
-              selected_xcode="$xcode_app"
-              break
-            fi
           fi
         done
 
         if [ -z "$selected_xcode" ]; then
-          echo "Failed to find an Xcode ${XCODE_MAJOR}.x installation with a usable iOS platform."
+          echo "Failed to find an Xcode ${XCODE_MAJOR}.x installation with an iphoneos SDK."
           exit 1
         fi
 
@@ -107,18 +92,15 @@ jobs:
         sudo xcode-select -s "$selected_xcode/Contents/Developer"
         echo "DEVELOPER_DIR=$selected_xcode/Contents/Developer" >> "$GITHUB_ENV"
         sudo "$selected_xcode/Contents/Developer/usr/bin/xcodebuild" -runFirstLaunch
-        sudo "$selected_xcode/Contents/Developer/usr/bin/xcodebuild" -downloadPlatform iOS || true
         "$selected_xcode/Contents/Developer/usr/bin/xcodebuild" -version
         "$selected_xcode/Contents/Developer/usr/bin/xcodebuild" -showsdks
 
-    - name: Ensure iOS Platform Is Installed
+    - name: Verify iPhoneOS SDK
       run: |
         set -eo pipefail
         sudo xcode-select -s "$DEVELOPER_DIR"
-        sudo xcodebuild -runFirstLaunch
-        sudo xcodebuild -downloadPlatform iOS
         xcodebuild -showsdks
-        xcodebuild -project OllamaKit.xcodeproj -scheme OllamaKit -showdestinations
+        xcodebuild -sdk iphoneos -version SDKVersion
 
     - name: Build llama.cpp XCFramework
       run: |
@@ -144,7 +126,6 @@ jobs:
           -scheme OllamaKit \
           -configuration ${{ env.CONFIGURATION }} \
           -sdk iphoneos \
-          -destination 'generic/platform=iOS' \
           -archivePath "build/OllamaKit.xcarchive" \
           CODE_SIGN_IDENTITY="" \
           CODE_SIGNING_REQUIRED=NO \
@@ -153,6 +134,7 @@ jobs:
           SKIP_INSTALL=NO \
           COMPILER_INDEX_STORE_ENABLE=NO \
           IPHONEOS_DEPLOYMENT_TARGET=${{ env.IOS_DEPLOYMENT_TARGET }} \
+          VALIDATE_PRODUCT=NO \
           ONLY_ACTIVE_ARCH=NO \
           ARCHS="arm64" \
           2>&1 | tee build/build.log

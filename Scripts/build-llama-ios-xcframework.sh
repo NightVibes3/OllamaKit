@@ -153,16 +153,41 @@ create_dynamic_framework() {
 
     mkdir -p "$temp_dir"
 
+    resolve_static_lib() {
+        local library_name="$1"
+        local expected_path="$2"
+
+        if [[ -f "$expected_path" ]]; then
+            printf '%s\n' "$expected_path"
+            return 0
+        fi
+
+        local resolved_path
+        resolved_path="$(find "$build_dir" -name "$library_name" -type f | sort | head -n 1)"
+        if [[ -n "$resolved_path" ]]; then
+            printf '%s\n' "$resolved_path"
+            return 0
+        fi
+
+        echo "Missing required static library: $library_name" >&2
+        echo "Expected path: $expected_path" >&2
+        echo "Available static libraries under $build_dir:" >&2
+        find "$build_dir" -name '*.a' -type f | sort >&2 || true
+        exit 1
+    }
+
     local libs=(
-        "${build_dir}/src/${release_dir}/libllama.a"
-        "${build_dir}/ggml/src/${release_dir}/libggml.a"
-        "${build_dir}/ggml/src/${release_dir}/libggml-base.a"
-        "${build_dir}/ggml/src/${release_dir}/libggml-cpu.a"
-        "${build_dir}/ggml/src/ggml-metal/${release_dir}/libggml-metal.a"
-        "${build_dir}/ggml/src/ggml-blas/${release_dir}/libggml-blas.a"
+        "$(resolve_static_lib libllama.a "${build_dir}/src/${release_dir}/libllama.a")"
+        "$(resolve_static_lib libggml.a "${build_dir}/ggml/src/${release_dir}/libggml.a")"
+        "$(resolve_static_lib libggml-base.a "${build_dir}/ggml/src/${release_dir}/libggml-base.a")"
+        "$(resolve_static_lib libggml-cpu.a "${build_dir}/ggml/src/${release_dir}/libggml-cpu.a")"
+        "$(resolve_static_lib libggml-metal.a "${build_dir}/ggml/src/ggml-metal/${release_dir}/libggml-metal.a")"
+        "$(resolve_static_lib libggml-blas.a "${build_dir}/ggml/src/ggml-blas/${release_dir}/libggml-blas.a")"
     )
 
-    xcrun libtool -static -o "${temp_dir}/combined.a" "${libs[@]}" 2>/dev/null
+    echo "Combining static libraries:"
+    printf '  %s\n' "${libs[@]}"
+    xcrun libtool -static -o "${temp_dir}/combined.a" "${libs[@]}"
 
     local arch_flags=()
     for arch in $archs; do
