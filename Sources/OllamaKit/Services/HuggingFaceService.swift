@@ -142,9 +142,9 @@ final class HuggingFaceService: @unchecked Sendable {
     }
 
     func cancelDownload(id: String) {
-        activeDownloadsLock.lock()
-        activeDownloads[id]?.task.cancel()
-        activeDownloadsLock.unlock()
+        activeDownloadsLock.withLock {
+            activeDownloads[id]?.task.cancel()
+        }
     }
 
     func getModelInfo(modelId: String) async throws -> ModelInfo {
@@ -200,11 +200,13 @@ final class HuggingFaceService: @unchecked Sendable {
             let task = session.downloadTask(with: request) { [weak self] temporaryURL, response, error in
                 var completedDownload: ActiveDownload?
                 if let self {
-                    self.activeDownloadsLock.lock()
-                    if let activeDownload = self.activeDownloads[id], activeDownload.token == downloadToken {
-                        completedDownload = self.activeDownloads.removeValue(forKey: id)
+                    completedDownload = self.activeDownloadsLock.withLock { () -> ActiveDownload? in
+                        guard let activeDownload = self.activeDownloads[id], activeDownload.token == downloadToken else {
+                            return nil
+                        }
+
+                        return self.activeDownloads.removeValue(forKey: id)
                     }
-                    self.activeDownloadsLock.unlock()
                 }
                 completedDownload?.observation.invalidate()
 
@@ -243,13 +245,13 @@ final class HuggingFaceService: @unchecked Sendable {
                 )
             }
 
-            activeDownloadsLock.lock()
-            if let existingDownload = activeDownloads[id] {
-                existingDownload.task.cancel()
-                existingDownload.observation.invalidate()
+            activeDownloadsLock.withLock {
+                if let existingDownload = activeDownloads[id] {
+                    existingDownload.task.cancel()
+                    existingDownload.observation.invalidate()
+                }
+                activeDownloads[id] = ActiveDownload(token: downloadToken, task: task, observation: observation)
             }
-            activeDownloads[id] = ActiveDownload(token: downloadToken, task: task, observation: observation)
-            activeDownloadsLock.unlock()
 
             task.resume()
         }
@@ -285,6 +287,14 @@ final class HuggingFaceService: @unchecked Sendable {
             url.appendPathComponent(component)
         }
         return url
+    }
+}
+
+private extension NSLock {
+    func withLock<T>(_ body: () throws -> T) rethrows -> T {
+        lock()
+        defer { unlock() }
+        return try body()
     }
 }
 
