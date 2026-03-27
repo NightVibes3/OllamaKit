@@ -1,65 +1,96 @@
 import SwiftUI
 import SwiftData
 import UIKit
+import UniformTypeIdentifiers
 
 struct ModelsView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \DownloadedModel.downloadDate, order: .reverse) private var downloadedModels: [DownloadedModel]
     
+    @ObservedObject private var modelRunner = ModelRunner.shared
     @StateObject private var viewModel = ModelsViewModel()
     @State private var showingSearch = false
+    @State private var showingImporter = false
+
+    private var activeModel: DownloadedModel? {
+        guard let loadedModelPath = modelRunner.activeLoadedModelPath else { return nil }
+        return downloadedModels.first { $0.localPath == loadedModelPath }
+    }
+
+    private var supportedImportTypes: [UTType] {
+        if let ggufType = UTType(filenameExtension: "gguf") {
+            return [ggufType, .data]
+        }
+
+        return [.data]
+    }
     
     var body: some View {
         ZStack {
             AnimatedMeshBackground()
-            
-            List {
-                // Downloaded Models Section
-                Section {
-                    if downloadedModels.isEmpty {
-                        EmptyModelsView()
-                            .listRowBackground(Color.clear)
-                    } else {
-                        ForEach(downloadedModels) { model in
-                            DownloadedModelRow(model: model, viewModel: viewModel)
+
+            ScrollView {
+                VStack(spacing: 20) {
+                    if let activeModel {
+                        SurfaceSectionCard(title: "Active Model") {
+                            ActiveModelSummary(model: activeModel)
                         }
-                        .onDelete(perform: deleteModels)
                     }
-                } header: {
-                    HStack {
-                        Text("Downloaded Models")
-                        Spacer()
-                        Text("\(downloadedModels.count)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+
+                    SurfaceSectionCard(
+                        title: "Downloaded Models",
+                        footer: downloadedModels.isEmpty
+                            ? "Download GGUF models from Hugging Face or import a local GGUF file to get started."
+                            : "\(downloadedModels.count) model\(downloadedModels.count == 1 ? "" : "s") available on this device."
+                    ) {
+                        if downloadedModels.isEmpty {
+                            EmptyModelsView()
+                        } else {
+                            VStack(spacing: 0) {
+                                ForEach(Array(downloadedModels.enumerated()), id: \.element.id) { index, model in
+                                    DownloadedModelRow(model: model, viewModel: viewModel)
+
+                                    if index < downloadedModels.count - 1 {
+                                        Divider()
+                                    }
+                                }
+                            }
+                        }
                     }
-                }
-                .listRowBackground(
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(.ultraThinMaterial)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 16)
-                                .stroke(.white.opacity(0.1), lineWidth: 0.5)
-                        )
-                )
-                .listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
-                
-                // Browse More Section
-                Section {
+
                     BrowseMoreCard {
                         showingSearch = true
                     }
-                    .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets())
+
+                    ImportLocalModelCard {
+                        showingImporter = true
+                    }
                 }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 16)
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
+            .scrollIndicators(.hidden)
         }
         .navigationTitle("Models")
         .sheet(isPresented: $showingSearch) {
             ModelSearchSheet()
+        }
+        .fileImporter(
+            isPresented: $showingImporter,
+            allowedContentTypes: supportedImportTypes,
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                guard let url = urls.first else { return }
+                Task {
+                    await viewModel.importLocalModel(from: url)
+                }
+            case .failure(let error):
+                viewModel.alertTitle = "Import Failed"
+                viewModel.errorMessage = error.localizedDescription
+                viewModel.showError = true
+            }
         }
         .alert(isPresented: $viewModel.showError) {
             Alert(
@@ -97,6 +128,73 @@ struct ModelsView: View {
     }
 }
 
+struct ActiveModelSummary: View {
+    let model: DownloadedModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(Color.green.opacity(0.16))
+                        .frame(width: 46, height: 46)
+
+                    Image(systemName: "bolt.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.green)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(model.displayName)
+                        .font(.system(size: 18, weight: .semibold))
+
+                    Text("Loaded and ready for chat")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button("Unload") {
+                    ModelRunner.shared.unloadModel()
+                    Task { @MainActor in
+                        HapticManager.impact(.medium)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .tint(.orange)
+            }
+
+            HStack(spacing: 10) {
+                ModelFactChip(icon: "cpu", text: model.quantization)
+                ModelFactChip(icon: "externaldrive", text: model.formattedSize)
+                ModelFactChip(icon: "text.alignleft", text: "\(model.runtimeContextLength) ctx")
+            }
+        }
+        .padding(.vertical, 16)
+    }
+}
+
+struct ModelFactChip: View {
+    let icon: String
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+            Text(text)
+        }
+        .font(.system(size: 12, weight: .medium))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            Capsule()
+                .fill(.ultraThinMaterial)
+        )
+    }
+}
+
 struct DownloadedModelRow: View {
     @Environment(\.modelContext) private var modelContext
     @ObservedObject private var modelRunner = ModelRunner.shared
@@ -123,6 +221,12 @@ struct DownloadedModelRow: View {
                     .font(.system(size: 17, weight: .semibold))
                 
                 HStack(spacing: 12) {
+                    if model.modelId.hasPrefix("local/") {
+                        Label("Local", systemImage: "square.and.arrow.down")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+
                     Label(model.quantization, systemImage: "cpu")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
@@ -298,8 +402,6 @@ struct DownloadedModelRow: View {
 struct EmptyModelsView: View {
     var body: some View {
         VStack(spacing: 16) {
-            Spacer()
-            
             ZStack {
                 Circle()
                     .fill(.ultraThinMaterial)
@@ -318,10 +420,9 @@ struct EmptyModelsView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
-            
-            Spacer()
         }
-        .frame(maxWidth: .infinity, minHeight: 200)
+        .frame(maxWidth: .infinity, minHeight: 180)
+        .padding(.vertical, 18)
     }
 }
 
@@ -372,8 +473,56 @@ struct BrowseMoreCard: View {
             )
         }
         .buttonStyle(.plain)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+    }
+}
+
+struct ImportLocalModelCard: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 16) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(
+                            LinearGradient(
+                                colors: [.green.opacity(0.28), .cyan.opacity(0.24)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 60, height: 60)
+
+                    Image(systemName: "square.and.arrow.down")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Import Local GGUF")
+                        .font(.system(size: 17, weight: .semibold))
+
+                    Text("Bring an existing model file into the app")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Image(systemName: "chevron.right")
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(16)
+            .background(
+                RoundedRectangle(cornerRadius: 20)
+                    .fill(.ultraThinMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20)
+                            .stroke(.white.opacity(0.1), lineWidth: 0.5)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -790,6 +939,114 @@ class ModelsViewModel: ObservableObject {
     @Published var showError = false
     @Published var alertTitle = "Error"
     @Published var errorMessage = ""
+
+    func importLocalModel(from sourceURL: URL) async {
+        do {
+            let importedModel = try importGGUFModel(from: sourceURL)
+            ModelStorage.shared.upsertDownloadedModel(importedModel)
+            alertTitle = "Model Imported"
+            errorMessage = "\(importedModel.displayName) is ready to load."
+            showError = true
+            HapticManager.notification(.success)
+        } catch {
+            alertTitle = "Import Failed"
+            errorMessage = error.localizedDescription
+            showError = true
+            HapticManager.notification(.error)
+        }
+    }
+
+    private func importGGUFModel(from sourceURL: URL) throws -> DownloadedModel {
+        guard sourceURL.pathExtension.lowercased() == "gguf" else {
+            throw LocalModelImportError.invalidFileType
+        }
+
+        let startedAccessing = sourceURL.startAccessingSecurityScopedResource()
+        defer {
+            if startedAccessing {
+                sourceURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        guard FileManager.default.fileExists(atPath: sourceURL.path) else {
+            throw LocalModelImportError.fileMissing
+        }
+
+        try ModelPathHelper.ensureModelsDirectoryExists()
+
+        let importsDirectory = ModelPathHelper.modelsDirectoryURL.appendingPathComponent("LocalImports", isDirectory: true)
+        try FileManager.default.createDirectory(at: importsDirectory, withIntermediateDirectories: true)
+
+        let destinationURL = uniqueImportedDestinationURL(for: sourceURL.lastPathComponent, in: importsDirectory)
+        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+
+        let size = (try FileManager.default.attributesOfItem(atPath: destinationURL.path)[.size] as? NSNumber)?.int64Value ?? 0
+        let filename = destinationURL.deletingPathExtension().lastPathComponent
+
+        return DownloadedModel(
+            name: filename,
+            modelId: "local/\(sanitizedLocalModelIdentifier(for: filename))",
+            localPath: destinationURL.path,
+            size: size,
+            downloadDate: .now,
+            isDownloaded: true,
+            quantization: detectQuantization(from: destinationURL.lastPathComponent) ?? "GGUF",
+            parameters: detectParameterSize(from: destinationURL.lastPathComponent),
+            contextLength: AppSettings.shared.defaultContextLength
+        )
+    }
+
+    private func uniqueImportedDestinationURL(for filename: String, in directory: URL) -> URL {
+        let fileExtension = URL(fileURLWithPath: filename).pathExtension
+        let baseName = URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent
+
+        var candidate = directory.appendingPathComponent(filename)
+        var suffix = 2
+
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            let nextName = "\(baseName)-\(suffix).\(fileExtension)"
+            candidate = directory.appendingPathComponent(nextName)
+            suffix += 1
+        }
+
+        return candidate
+    }
+
+    private func sanitizedLocalModelIdentifier(for name: String) -> String {
+        let lowered = name.lowercased()
+        let sanitized = lowered.replacingOccurrences(of: #"[^a-z0-9._-]+"#, with: "-", options: .regularExpression)
+        return sanitized.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+
+    private func detectQuantization(from filename: String) -> String? {
+        let patterns = [
+            "Q2_K", "Q3_K_S", "Q3_K_M", "Q3_K_L",
+            "Q4_0", "Q4_K_S", "Q4_K_M",
+            "Q5_0", "Q5_K_S", "Q5_K_M",
+            "Q6_K", "Q8_0", "F16", "FP16", "FP32"
+        ]
+
+        return patterns.first { filename.localizedCaseInsensitiveContains($0) }
+    }
+
+    private func detectParameterSize(from filename: String) -> String {
+        let matches = filename.range(of: #"\d+(\.\d+)?[Bb]"#, options: .regularExpression)
+        return matches.map { String(filename[$0]).uppercased() } ?? "Unknown"
+    }
+}
+
+enum LocalModelImportError: LocalizedError {
+    case invalidFileType
+    case fileMissing
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidFileType:
+            return "Please choose a GGUF model file."
+        case .fileMissing:
+            return "The selected file is no longer available."
+        }
+    }
 }
 
 @MainActor
