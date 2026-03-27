@@ -67,9 +67,14 @@ jobs:
         echo "=== Build directory contents ==="
         ls -la build/
 
-        echo "=== Archive contents ==="
+        echo "=== Archive contents (detailed) ==="
         if [ -d "build/OllamaKit.xcarchive" ]; then
-          find build/OllamaKit.xcarchive -type d -maxdepth 4
+          echo "Archive exists at build/OllamaKit.xcarchive"
+          find build/OllamaKit.xcarchive -type f | head -30
+          echo "=== Products directory ==="
+          ls -la build/OllamaKit.xcarchive/Products/ 2>/dev/null || echo "No Products dir"
+          echo "=== Applications directory ==="
+          ls -la build/OllamaKit.xcarchive/Products/Applications/ 2>/dev/null || echo "No Applications dir"
         else
           echo "Archive not found at expected location"
           find build -type d -name "*.xcarchive" 2>/dev/null
@@ -78,12 +83,33 @@ jobs:
     - name: Create IPA (Unsigned)
       run: |
         echo "=== Looking for .app in archive ==="
-        APP_PATH=$(find build/OllamaKit.xcarchive -name "*.app" -type d 2>/dev/null | head -1)
+        
+        # Try multiple locations for the .app
+        APP_PATH=""
+        
+        # Location 1: Standard archive location
+        if [ -d "build/OllamaKit.xcarchive/Products/Applications" ]; then
+          APP_PATH=$(find build/OllamaKit.xcarchive/Products/Applications -name "*.app" -type d | head -1)
+        fi
+        
+        # Location 2: Anywhere in the archive
+        if [ -z "$APP_PATH" ]; then
+          APP_PATH=$(find build/OllamaKit.xcarchive -name "*.app" -type d | head -1)
+        fi
+        
+        # Location 3: Check if archive was created with different name
+        if [ -z "$APP_PATH" ]; then
+          ARCHIVE=$(find build -name "*.xcarchive" -type d | head -1)
+          if [ -n "$ARCHIVE" ]; then
+            echo "Found archive at: $ARCHIVE"
+            APP_PATH=$(find "$ARCHIVE" -name "*.app" -type d | head -1)
+          fi
+        fi
 
         if [ -z "$APP_PATH" ]; then
           echo "Error: Could not find .app file in archive"
-          echo "=== Archive structure ==="
-          find build/OllamaKit.xcarchive -type f 2>/dev/null | head -50
+          echo "=== Full archive structure ==="
+          find build -type f 2>/dev/null | head -100
           exit 1
         fi
 
