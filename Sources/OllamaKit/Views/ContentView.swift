@@ -218,6 +218,7 @@ struct AnimatedMeshBackground: View {
             }
         }
         .ignoresSafeArea()
+        .allowsHitTesting(false)
     }
 
     private func backgroundBlob(color: Color, size: CGSize, offset: CGSize) -> some View {

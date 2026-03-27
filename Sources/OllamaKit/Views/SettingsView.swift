@@ -8,116 +8,63 @@ struct SettingsView: View {
     var body: some View {
         ZStack {
             AnimatedMeshBackground()
-            
-            List {
-                // Model Settings
-                Section {
-                    ModelSettingsSection(settings: settings)
-                } header: {
-                    Text("Model Parameters")
-                } footer: {
-                    Text("Default parameters for model inference. These can be overridden per chat.")
-                }
-                .listRowBackground(
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(.ultraThinMaterial)
-                )
-                .listRowSeparator(.hidden)
-                
-                // Performance Settings
-                Section {
-                    PerformanceSettingsSection(settings: settings)
-                } header: {
-                    Text("Performance")
-                } footer: {
-                    Text("Adjust based on your device's capabilities. More GPU layers = faster but more memory usage.")
-                }
-                .listRowBackground(
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(.ultraThinMaterial)
-                )
-                .listRowSeparator(.hidden)
-                
-                // Memory Settings
-                Section {
-                    MemorySettingsSection(settings: settings)
-                } header: {
-                    Text("Memory Management")
-                }
-                .listRowBackground(
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(.ultraThinMaterial)
-                )
-                .listRowSeparator(.hidden)
-                
-                // Hugging Face
-                Section {
-                    HuggingFaceSettingsSection(settings: settings)
-                } header: {
-                    Text("Hugging Face")
-                } footer: {
-                    Text("Required for accessing gated models and higher rate limits.")
-                }
-                .listRowBackground(
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(.ultraThinMaterial)
-                )
-                .listRowSeparator(.hidden)
-                
-                // Interface Settings
-                Section {
-                    InterfaceSettingsSection(settings: settings)
-                } header: {
-                    Text("Interface")
-                }
-                .listRowBackground(
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(.ultraThinMaterial)
-                )
-                .listRowSeparator(.hidden)
-                
-                // Data Management
-                Section {
-                    DataManagementSection()
-                } header: {
-                    Text("Data Management")
-                }
-                .listRowBackground(
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(.ultraThinMaterial)
-                )
-                .listRowSeparator(.hidden)
-                
-                // About
-                Section {
-                    AboutSection()
-                }
-                .listRowBackground(
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(.ultraThinMaterial)
-                )
-                .listRowSeparator(.hidden)
-                
-                // Reset
-                Section {
-                    Button(role: .destructive) {
-                        showingResetConfirmation = true
-                    } label: {
-                        HStack {
-                            Spacer()
-                            Text("Reset All Settings")
-                            Spacer()
+
+            ScrollView {
+                VStack(spacing: 20) {
+                    SurfaceSectionCard(
+                        title: "Model Parameters",
+                        footer: "Default parameters for model inference. These can be overridden per chat."
+                    ) {
+                        ModelSettingsSection(settings: settings)
+                    }
+
+                    SurfaceSectionCard(
+                        title: "Performance",
+                        footer: "Adjust based on your device's capabilities. More GPU layers means faster inference but higher memory usage."
+                    ) {
+                        PerformanceSettingsSection(settings: settings)
+                    }
+
+                    SurfaceSectionCard(title: "Memory Management") {
+                        MemorySettingsSection(settings: settings)
+                    }
+
+                    SurfaceSectionCard(
+                        title: "Hugging Face",
+                        footer: "Required for accessing gated models and higher rate limits."
+                    ) {
+                        HuggingFaceSettingsSection(settings: settings)
+                    }
+
+                    SurfaceSectionCard(title: "Interface") {
+                        InterfaceSettingsSection(settings: settings)
+                    }
+
+                    SurfaceSectionCard(title: "Data Management") {
+                        DataManagementSection()
+                    }
+
+                    SurfaceSectionCard {
+                        AboutSection()
+                    }
+
+                    SurfaceSectionCard {
+                        Button(role: .destructive) {
+                            showingResetConfirmation = true
+                        } label: {
+                            HStack {
+                                Spacer()
+                                Text("Reset All Settings")
+                                Spacer()
+                            }
                         }
+                        .padding(.vertical, 14)
                     }
                 }
-                .listRowBackground(
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(.ultraThinMaterial)
-                )
-                .listRowSeparator(.hidden)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 16)
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
+            .scrollIndicators(.hidden)
         }
         .navigationTitle("Settings")
         .alert("Reset Settings?", isPresented: $showingResetConfirmation) {

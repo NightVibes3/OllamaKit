@@ -642,9 +642,7 @@ struct ModelDetailSheet: View {
                                     compatibility: viewModel.deviceProfile.compatibility(for: file.size),
                                     viewModel: viewModel
                                 ) {
-                                    Task {
-                                        await viewModel.downloadFile(file, modelId: model.modelId)
-                                    }
+                                    viewModel.requestDownload(file, modelId: model.modelId)
                                 }
                             }
                         }
@@ -670,6 +668,18 @@ struct ModelDetailSheet: View {
             }
             .task {
                 await viewModel.loadFiles(for: model.modelId)
+            }
+            .alert(item: $viewModel.pendingDownloadWarning) { warning in
+                Alert(
+                    title: Text(warning.title),
+                    message: Text(warning.message),
+                    primaryButton: .default(Text("Download Anyway")) {
+                        viewModel.confirmPendingDownload()
+                    },
+                    secondaryButton: .cancel {
+                        viewModel.cancelPendingDownload()
+                    }
+                )
             }
         }
         .interactiveDismissDisabled(viewModel.isDownloading)
@@ -799,6 +809,7 @@ class ModelSearchViewModel: ObservableObject {
     @Published var downloadingFile: GGUFInfo?
     @Published var downloadProgress = 0
     @Published var downloadError: String?
+    @Published var pendingDownloadWarning: ModelDownloadWarning?
 
     private var searchRequestID = UUID()
     private var filesRequestID = UUID()
@@ -928,6 +939,37 @@ class ModelSearchViewModel: ObservableObject {
             downloadError = error.localizedDescription
             HapticManager.notification(.error)
         }
+    }
+
+    func requestDownload(_ file: GGUFInfo, modelId: String) {
+        let compatibility = deviceProfile.compatibility(for: file.size)
+
+        switch compatibility {
+        case .recommended, .unknown:
+            Task {
+                await downloadFile(file, modelId: modelId)
+            }
+        case .supported, .tooLarge:
+            pendingDownloadWarning = ModelDownloadWarning(
+                file: file,
+                modelId: modelId,
+                compatibility: compatibility,
+                profile: deviceProfile
+            )
+        }
+    }
+
+    func confirmPendingDownload() {
+        guard let pendingDownloadWarning else { return }
+        self.pendingDownloadWarning = nil
+
+        Task {
+            await downloadFile(pendingDownloadWarning.file, modelId: pendingDownloadWarning.modelId)
+        }
+    }
+
+    func cancelPendingDownload() {
+        pendingDownloadWarning = nil
     }
 
     func cancelCurrentDownload() {
@@ -1108,6 +1150,44 @@ struct ModelRecommendation: Identifiable {
 
     var id: String {
         "\(model.id)#\(suggestedFile.id)"
+    }
+}
+
+struct ModelDownloadWarning: Identifiable {
+    let file: GGUFInfo
+    let modelId: String
+    let compatibility: ModelFileCompatibility
+    let profile: DeviceCapabilityProfile
+
+    var id: String {
+        "\(modelId)#\(file.id)"
+    }
+
+    var title: String {
+        switch compatibility {
+        case .supported:
+            return "Large Model Download"
+        case .tooLarge:
+            return "Model May Not Fit"
+        case .recommended, .unknown:
+            return "Download Model"
+        }
+    }
+
+    var message: String {
+        let filename = file.filename
+        let recommendedBudget = profile.formattedRecommendedBudget
+        let supportedBudget = profile.formattedSupportedBudget
+        let fileSize = file.size.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "unknown size"
+
+        switch compatibility {
+        case .supported:
+            return "\(filename) (\(fileSize)) is larger than the recommended budget for \(profile.deviceLabel). It may still run, but it can be slower and unload more often.\n\nRecommended: up to \(recommendedBudget)\nMay run: up to \(supportedBudget)"
+        case .tooLarge:
+            return "\(filename) (\(fileSize)) is above the likely working size for \(profile.deviceLabel). You can still download it, but it may fail to load or run poorly.\n\nRecommended: up to \(recommendedBudget)\nMay run: up to \(supportedBudget)"
+        case .recommended, .unknown:
+            return "Download \(filename)?"
+        }
     }
 }
 

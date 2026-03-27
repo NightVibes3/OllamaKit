@@ -24,6 +24,7 @@
 		000000010000000000000015 /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 000000010000000000000111 /* Accelerate.framework */; };
 		000000010000000000000016 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 000000010000000000000112 /* Metal.framework */; };
 		000000010000000000000017 /* llama.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 000000010000000000000110 /* llama.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		000000010000000000000018 /* SurfaceSectionCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000010000000000000113 /* SurfaceSectionCard.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -60,6 +61,7 @@
 		000000010000000000000110 /* llama.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = Vendor/llama.xcframework; sourceTree = SOURCE_ROOT; };
 		000000010000000000000111 /* Accelerate.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Accelerate.framework; path = System/Library/Frameworks/Accelerate.framework; sourceTree = SDKROOT; };
 		000000010000000000000112 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+		000000010000000000000113 /* SurfaceSectionCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfaceSectionCard.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -116,6 +118,7 @@
 				000000010000000000000105 /* ModelsView.swift */,
 				000000010000000000000106 /* ServerView.swift */,
 				000000010000000000000107 /* SettingsView.swift */,
+				000000010000000000000113 /* SurfaceSectionCard.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -223,6 +226,7 @@
 				00000001000000000000000A /* HuggingFaceService.swift in Sources */,
 				00000001000000000000000B /* BackgroundTaskManager.swift in Sources */,
 				00000001000000000000000D /* AppModels.swift in Sources */,
+				000000010000000000000018 /* SurfaceSectionCard.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

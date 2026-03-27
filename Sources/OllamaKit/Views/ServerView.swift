@@ -12,60 +12,29 @@ struct ServerView: View {
     var body: some View {
         ZStack {
             AnimatedMeshBackground()
-            
-            List {
-                // Server Status Card
-                Section {
+
+            ScrollView {
+                VStack(spacing: 20) {
                     ServerStatusCard(viewModel: viewModel)
-                }
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets())
-                
-                // Connection Info
-                Section {
+
                     ConnectionInfoCard(viewModel: viewModel)
+
+                    SurfaceSectionCard(title: "Server Configuration") {
+                        ServerSettingsSection(settings: settings)
+                    }
+
+                    SurfaceSectionCard(title: "Security") {
+                        SecuritySettingsSection(settings: settings)
+                    }
+
+                    SurfaceSectionCard(title: "API") {
+                        APIDocsSection()
+                    }
                 }
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets())
-                
-                // Server Settings
-                Section {
-                    ServerSettingsSection(settings: settings)
-                } header: {
-                    Text("Server Configuration")
-                }
-                .listRowBackground(
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(.ultraThinMaterial)
-                )
-                .listRowSeparator(.hidden)
-                
-                // Security Settings
-                Section {
-                    SecuritySettingsSection(settings: settings)
-                } header: {
-                    Text("Security")
-                }
-                .listRowBackground(
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(.ultraThinMaterial)
-                )
-                .listRowSeparator(.hidden)
-                
-                // API Documentation
-                Section {
-                    APIDocsSection()
-                } header: {
-                    Text("API")
-                }
-                .listRowBackground(
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(.ultraThinMaterial)
-                )
-                .listRowSeparator(.hidden)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 16)
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
+            .scrollIndicators(.hidden)
         }
         .navigationTitle("Server")
         .onAppear {
