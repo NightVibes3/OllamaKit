@@ -62,7 +62,17 @@ jobs:
           IPHONEOS_DEPLOYMENT_TARGET=17.0 \
           ONLY_ACTIVE_ARCH=NO \
           ARCHS="arm64" \
-          | tee build/build.log
+          2>&1 | tee build/build.log
+        
+        BUILD_EXIT_CODE=${PIPESTATUS[0]}
+        echo "Build exit code: $BUILD_EXIT_CODE"
+        
+        if [ $BUILD_EXIT_CODE -ne 0 ]; then
+          echo "=== BUILD FAILED ==="
+          echo "Last 100 lines of build log:"
+          tail -100 build/build.log
+          exit 1
+        fi
 
         echo "=== Build directory contents ==="
         ls -la build/
@@ -70,11 +80,14 @@ jobs:
         echo "=== Archive contents (detailed) ==="
         if [ -d "build/OllamaKit.xcarchive" ]; then
           echo "Archive exists at build/OllamaKit.xcarchive"
-          find build/OllamaKit.xcarchive -type f | head -30
+          echo "=== Archive root ==="
+          ls -la build/OllamaKit.xcarchive/
           echo "=== Products directory ==="
           ls -la build/OllamaKit.xcarchive/Products/ 2>/dev/null || echo "No Products dir"
           echo "=== Applications directory ==="
           ls -la build/OllamaKit.xcarchive/Products/Applications/ 2>/dev/null || echo "No Applications dir"
+          echo "=== All files in archive ==="
+          find build/OllamaKit.xcarchive -type f | head -50
         else
           echo "Archive not found at expected location"
           find build -type d -name "*.xcarchive" 2>/dev/null
@@ -108,7 +121,7 @@ jobs:
 
         if [ -z "$APP_PATH" ]; then
           echo "Error: Could not find .app file in archive"
-          echo "=== Full archive structure ==="
+          echo "=== Full build directory structure ==="
           find build -type f 2>/dev/null | head -100
           exit 1
         fi
@@ -142,6 +155,15 @@ jobs:
 
         echo "IPA contents:"
         unzip -l build/OllamaKit-unsigned.ipa | head -30
+
+    - name: Upload Build Logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-logs-${{ env.CONFIGURATION }}
+        path: build/build.log
+        retention-days: 7
+        if-no-files-found: ignore
 
     - name: Upload IPA Artifact
       uses: actions/upload-artifact@v4
@@ -235,7 +257,17 @@ jobs:
           -destination 'platform=iOS Simulator,name=iPhone 16' \
           CODE_SIGN_IDENTITY="" \
           CODE_SIGNING_REQUIRED=NO \
-          | tee build-simulator/build.log
+          2>&1 | tee build-simulator/build.log
+        
+        BUILD_EXIT_CODE=${PIPESTATUS[0]}
+        echo "Build exit code: $BUILD_EXIT_CODE"
+        
+        if [ $BUILD_EXIT_CODE -ne 0 ]; then
+          echo "=== BUILD FAILED ==="
+          echo "Last 100 lines of build log:"
+          tail -100 build-simulator/build.log
+          exit 1
+        fi
 
         APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "OllamaKit.app" -path "*iphonesimulator*" -type d 2>/dev/null | head -1)
 
