@@ -195,7 +195,7 @@ public struct ModelCatalogEntry: Codable, Hashable, Identifiable, Sendable {
         var seen = Set<String>()
 
         for rawValue in rawValues {
-            let normalized = rawValue.trimmedForLookup.lowercased()
+            let normalized = rawValue?.trimmedForLookup.lowercased() ?? ""
             guard !normalized.isEmpty, !seen.contains(normalized) else { continue }
             seen.insert(normalized)
             deduplicated.append(normalized)

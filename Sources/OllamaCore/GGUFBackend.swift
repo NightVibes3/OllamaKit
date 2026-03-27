@@ -4,7 +4,7 @@ import Foundation
 import llama
 #endif
 
-final class GGUFBackend: InferenceBackend {
+final class GGUFBackend: InferenceBackend, @unchecked Sendable {
     let kind: ModelBackendKind = .ggufLlama
 
     var activeCatalogId: String? {
@@ -382,7 +382,7 @@ private final class BackendEngine {
     }
 
     private static func initializeBackendIfNeeded() throws {
-        try backendInitLock.withLock {
+        backendInitLock.withLock {
             guard !backendInitialized else { return }
             llama_backend_init()
             backendInitialized = true

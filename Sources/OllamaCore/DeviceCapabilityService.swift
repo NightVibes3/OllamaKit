@@ -218,12 +218,8 @@ public actor DeviceCapabilityService {
     }
 
     private func systemVersionString() -> String {
-        #if canImport(UIKit)
-        return UIDevice.current.systemVersion
-        #else
         let version = ProcessInfo.processInfo.operatingSystemVersion
         return "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)"
-        #endif
     }
 
     private func chipFamily(for machineIdentifier: String) -> String {

@@ -108,7 +108,7 @@ public actor RuntimeCoordinator {
     }
 }
 
-final class AppleFoundationBackend: InferenceBackend {
+final class AppleFoundationBackend: InferenceBackend, @unchecked Sendable {
     let kind: ModelBackendKind = .appleFoundation
 
     var activeCatalogId: String? {
@@ -211,7 +211,7 @@ final class AppleFoundationBackend: InferenceBackend {
     }
 }
 
-final class CoreMLPackageBackend: InferenceBackend {
+final class CoreMLPackageBackend: InferenceBackend, @unchecked Sendable {
     let kind: ModelBackendKind = .coreMLPackage
 
     var activeCatalogId: String? {
