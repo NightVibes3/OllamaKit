@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import OllamaCore
 
 final class ServerManager {
     static let shared = ServerManager()
