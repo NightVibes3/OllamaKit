@@ -21,9 +21,18 @@ env:
   SCHEME: "OllamaKit"
   CONFIGURATION: ${{ github.event.inputs.build_type == 'debug' && 'Debug' || 'Release' }}
 
+permissions:
+  contents: write
+  packages: write
+  actions: read
+
 jobs:
   build:
     runs-on: macos-15
+    permissions:
+      contents: write
+      packages: write
+      actions: read
     
     steps:
     - name: Checkout Repository
