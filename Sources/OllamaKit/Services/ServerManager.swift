@@ -158,7 +158,7 @@ final class ServerManager {
             case .cancelled, .failed:
                 guard let self else { return }
                 self.stateLock.withLock {
-                    self.connections.removeValue(forKey: ObjectIdentifier(connection))
+                    _ = self.connections.removeValue(forKey: ObjectIdentifier(connection))
                 }
             default:
                 break
