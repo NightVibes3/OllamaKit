@@ -95,8 +95,35 @@ jobs:
         sudo xcode-select -s "$DEVELOPER_DIR"
         xcodebuild -showsdks
         xcodebuild -sdk iphoneos -version SDKVersion
-        sudo xcodebuild -downloadPlatform iOS || echo "Skipping platform download refresh; continuing with installed SDKs."
-        xcrun simctl runtime list || echo "Simulator runtime listing unavailable on this runner; continuing."
+        simulator_sdk_version="$(xcodebuild -sdk iphonesimulator -version SDKVersion)"
+        matching_runtime=""
+
+        for attempt in 1 2 3; do
+          echo "Refreshing iOS platform components (attempt $attempt)..."
+          if sudo xcodebuild -downloadPlatform iOS; then
+            echo "Platform refresh completed."
+          else
+            echo "Platform refresh attempt $attempt failed."
+          fi
+
+          runtime_output="$(xcrun simctl runtime list 2>&1 || true)"
+          printf '%s\n' "$runtime_output"
+
+          matching_runtime="$(printf '%s\n' "$runtime_output" | grep -F "iOS ${simulator_sdk_version} " | head -1 || true)"
+          if [ -n "$matching_runtime" ]; then
+            echo "Found matching iOS simulator runtime: $matching_runtime"
+            break
+          fi
+
+          if [ "$attempt" -lt 3 ]; then
+            sleep 15
+          fi
+        done
+
+        if [ -z "$matching_runtime" ]; then
+          echo "No installed iOS simulator runtime matches SDK version ${simulator_sdk_version}."
+          exit 1
+        fi
 
     - name: Build llama.cpp XCFramework
       run: |
