@@ -150,6 +150,20 @@ private extension ModelSnapshot {
             return "Apple Foundation"
         }
     }
+
+    var isRunnableInCurrentBuild: Bool {
+        backendKind != .coreMLPackage
+    }
+
+    var runtimeAvailabilityLabel: String? {
+        guard backendKind == .coreMLPackage else { return nil }
+        return "Imported Only"
+    }
+
+    var runtimeAvailabilityMessage: String? {
+        guard backendKind == .coreMLPackage else { return nil }
+        return "This CoreML package is imported and managed by the app, but this build cannot execute CoreML chat models yet."
+    }
 }
 
 private extension ModelCompatibilityLevel {
@@ -236,7 +250,6 @@ struct ModelFactChip: View {
 
 struct DownloadedModelRow: View {
     @ObservedObject private var modelRunner = ModelRunner.shared
-    @ObservedObject private var settings = AppSettings.shared
     let model: ModelSnapshot
     @ObservedObject var viewModel: ModelsViewModel
     @State private var showingOptions = false
@@ -281,6 +294,15 @@ struct DownloadedModelRow: View {
                     Label("\(model.runtimeContextLength) ctx", systemImage: "text.alignleft")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
+
+                    if let runtimeAvailabilityLabel = model.runtimeAvailabilityLabel {
+                        Text("•")
+                            .foregroundStyle(.tertiary)
+
+                        Label(runtimeAvailabilityLabel, systemImage: "exclamationmark.triangle")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.orange)
+                    }
                 }
             }
             
@@ -303,27 +325,18 @@ struct DownloadedModelRow: View {
         }
         .padding(.vertical, 8)
         .contextMenu {
-            Button {
-                Task {
-                    do {
-                        try await ModelRunner.shared.loadModel(
-                            catalogId: model.catalogId,
-                            contextLength: model.runtimeContextLength,
-                            gpuLayers: AppSettings.shared.gpuLayers
-                        )
-                        await MainActor.run {
-                            HapticManager.notification(.success)
-                        }
-                    } catch {
-                        viewModel.errorMessage = error.localizedDescription
-                        viewModel.showError = true
-                        await MainActor.run {
-                            HapticManager.notification(.error)
-                        }
-                    }
+            if model.isRunnableInCurrentBuild {
+                Button {
+                    loadModel()
+                } label: {
+                    Label("Load Model", systemImage: "play.circle")
                 }
+            }
+
+            Button {
+                presentModelInfo()
             } label: {
-                Label("Load Model", systemImage: "play.circle")
+                Label("View Info", systemImage: "info.circle")
             }
 
             Button(role: .destructive) {
@@ -333,48 +346,72 @@ struct DownloadedModelRow: View {
             }
         }
         .confirmationDialog("Model Options", isPresented: $showingOptions, titleVisibility: .visible) {
-            Button("Load Model") {
-                Task {
-                    do {
-                        try await ModelRunner.shared.loadModel(
-                            catalogId: model.catalogId,
-                            contextLength: model.runtimeContextLength,
-                            gpuLayers: AppSettings.shared.gpuLayers
-                        )
-                        await MainActor.run {
-                            HapticManager.notification(.success)
-                        }
-                    } catch {
-                        viewModel.errorMessage = error.localizedDescription
-                        viewModel.showError = true
-                        await MainActor.run {
-                            HapticManager.notification(.error)
-                        }
+            if model.isRunnableInCurrentBuild {
+                Button("Load Model") {
+                    loadModel()
+                }
+            }
+
+            if model.isRunnableInCurrentBuild {
+                Button("Set as Default") {
+                    AppSettings.shared.defaultModelId = model.persistentReference
+                    viewModel.alertTitle = "Default Model"
+                    viewModel.errorMessage = "\(model.displayName) will be preselected for new chats."
+                    viewModel.showError = true
+                    Task { @MainActor in
+                        HapticManager.selectionChanged()
                     }
                 }
             }
-            
-            Button("Set as Default") {
-                AppSettings.shared.defaultModelId = model.persistentReference
-                viewModel.alertTitle = "Default Model"
-                viewModel.errorMessage = "\(model.displayName) will be preselected for new chats."
-                viewModel.showError = true
-                Task { @MainActor in
-                    HapticManager.selectionChanged()
-                }
-            }
-            
+
             Button("View Info") {
-                viewModel.alertTitle = "Model Info"
-                viewModel.errorMessage = "Model: \(model.displayName)\nBackend: \(model.backendDisplayName)\nQuantization: \(model.quantization)\nContext: \(model.runtimeContextLength)\nIdentifier: \(model.catalogId)"
-                viewModel.showError = true
+                presentModelInfo()
             }
-            
+
             Button("Delete", role: .destructive) {
                 deleteModel()
             }
             Button("Cancel", role: .cancel) {}
         }
+    }
+
+    private func loadModel() {
+        Task {
+            do {
+                try await ModelRunner.shared.loadModel(
+                    catalogId: model.catalogId,
+                    contextLength: model.runtimeContextLength,
+                    gpuLayers: AppSettings.shared.gpuLayers
+                )
+                await MainActor.run {
+                    HapticManager.notification(.success)
+                }
+            } catch {
+                viewModel.errorMessage = error.localizedDescription
+                viewModel.showError = true
+                await MainActor.run {
+                    HapticManager.notification(.error)
+                }
+            }
+        }
+    }
+
+    private func presentModelInfo() {
+        var details = [
+            "Model: \(model.displayName)",
+            "Backend: \(model.backendDisplayName)",
+            "Quantization: \(model.quantization)",
+            "Context: \(model.runtimeContextLength)",
+            "Identifier: \(model.catalogId)"
+        ]
+
+        if let runtimeAvailabilityMessage = model.runtimeAvailabilityMessage {
+            details.append(runtimeAvailabilityMessage)
+        }
+
+        viewModel.alertTitle = "Model Info"
+        viewModel.errorMessage = details.joined(separator: "\n")
+        viewModel.showError = true
     }
 
     private func deleteModel() {
@@ -1039,7 +1076,11 @@ class ModelsViewModel: ObservableObject {
             }
 
             alertTitle = "Model Imported"
-            errorMessage = "\(importedModel.displayName) is ready to use."
+            if importedModel.backendKind == .coreMLPackage {
+                errorMessage = "\(importedModel.displayName) was imported successfully. This build can manage CoreML packages, but it cannot run them for chat yet."
+            } else {
+                errorMessage = "\(importedModel.displayName) is ready to use."
+            }
             showError = true
             HapticManager.notification(.success)
         } catch {

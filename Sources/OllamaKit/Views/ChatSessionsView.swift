@@ -200,10 +200,10 @@ struct NewChatSheet: View {
                                     .font(.system(size: 40))
                                     .foregroundStyle(.secondary)
                                 
-                                Text("No Models Downloaded")
+                                Text("No Runnable Models")
                                     .font(.headline)
                                 
-                                Text("Download a model from the Models tab first")
+                                Text("Download a GGUF model or use Apple On-Device AI if it is available on this device. Imported CoreML packages are managed in Models, but they cannot chat in this build yet.")
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
                                     .multilineTextAlignment(.center)
@@ -296,15 +296,14 @@ struct NewChatSheet: View {
             }
         }
         .onAppear {
-            if selectedModel == nil, !AppSettings.shared.defaultModelId.isEmpty {
-                selectedModel = BuiltInModelCatalog.resolveStoredReference(AppSettings.shared.defaultModelId, in: modelStore.selectionSnapshots)
-            }
+            syncInitialSelection()
             if systemPrompt.isEmpty {
                 systemPrompt = "You are a helpful assistant."
             }
         }
         .task {
             await modelStore.refresh()
+            syncInitialSelection()
         }
     }
     
@@ -324,6 +323,25 @@ struct NewChatSheet: View {
         }
         
         dismiss()
+    }
+
+    private func syncInitialSelection() {
+        if let selectedModel,
+           availableModels.contains(where: { $0.id == selectedModel.id }) {
+            return
+        }
+
+        if !AppSettings.shared.defaultModelId.isEmpty,
+           let defaultModel = BuiltInModelCatalog.resolveStoredReference(
+                AppSettings.shared.defaultModelId,
+                in: modelStore.selectionSnapshots
+           ),
+           availableModels.contains(where: { $0.id == defaultModel.id }) {
+            selectedModel = defaultModel
+            return
+        }
+
+        selectedModel = availableModels.first
     }
 }
 

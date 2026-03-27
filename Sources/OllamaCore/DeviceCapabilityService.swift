@@ -198,9 +198,9 @@ public actor DeviceCapabilityService {
 
         return CompatibilityReport(
             backendKind: .coreMLPackage,
-            level: .supported,
-            title: "Imported",
-            message: "This CoreML package is structurally valid and can be managed by the app. Execution support depends on the package runtime included in the build."
+            level: .unavailable,
+            title: "Imported Only",
+            message: "This CoreML package is structurally valid and can be managed by the app, but this build does not include a CoreML text-generation runtime yet."
         )
     }
 

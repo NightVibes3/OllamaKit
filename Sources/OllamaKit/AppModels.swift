@@ -209,7 +209,18 @@ enum BuiltInModelCatalog {
     }
 
     static func selectionModels(downloadedModels: [ModelSnapshot]) -> [ModelSnapshot] {
-        downloadedModels
+        let appleIsAvailable = availability().isAvailable
+
+        return downloadedModels.filter { model in
+            switch model.backendKind {
+            case .ggufLlama:
+                return model.fileExists
+            case .appleFoundation:
+                return appleIsAvailable
+            case .coreMLPackage:
+                return false
+            }
+        }
     }
 
     static func resolveStoredReference(_ candidate: String, in downloadedModels: [ModelSnapshot]) -> ModelSnapshot? {
