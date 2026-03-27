@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import UIKit
 
 struct ModelsView: View {
     @Environment(\.modelContext) private var modelContext
@@ -401,25 +402,47 @@ struct ModelSearchSheet: View {
                         }
                     } else if searchText.isEmpty {
                         Section {
-                            VStack(spacing: 12) {
-                                Spacer()
-                                
-                                Image(systemName: "magnifyingglass")
-                                    .font(.system(size: 50))
-                                    .foregroundStyle(.secondary)
-                                
-                                Text("Search Hugging Face")
-                                    .font(.system(size: 20, weight: .bold))
-                                
-                                Text("Find GGUF models to download and chat with")
-                                    .font(.system(size: 15))
-                                    .foregroundStyle(.secondary)
-                                    .multilineTextAlignment(.center)
-                                
-                                Spacer()
+                            DeviceCapabilityCard(profile: searchVM.deviceProfile)
+                                .listRowBackground(Color.clear)
+                        } header: {
+                            Text("This Device")
+                        }
+
+                        Section {
+                            if searchVM.isLoadingRecommendations {
+                                HStack {
+                                    Spacer()
+                                    ProgressView()
+                                    Spacer()
+                                }
+                                .padding(.vertical, 24)
+                                .listRowBackground(Color.clear)
+                            } else if searchVM.recommendations.isEmpty {
+                                VStack(spacing: 12) {
+                                    Image(systemName: "sparkles")
+                                        .font(.system(size: 42))
+                                        .foregroundStyle(.secondary)
+
+                                    Text("No tailored suggestions yet")
+                                        .font(.system(size: 19, weight: .bold))
+
+                                    Text("Search any GGUF model below. Compatibility badges in model details will still tell you what is realistic for this phone.")
+                                        .font(.system(size: 14))
+                                        .foregroundStyle(.secondary)
+                                        .multilineTextAlignment(.center)
+                                }
+                                .frame(maxWidth: .infinity, minHeight: 180)
+                                .padding(.vertical, 20)
+                                .listRowBackground(Color.clear)
+                            } else {
+                                ForEach(searchVM.recommendations) { recommendation in
+                                    RecommendedModelRow(recommendation: recommendation, viewModel: searchVM)
+                                }
                             }
-                            .frame(maxWidth: .infinity, minHeight: 300)
-                            .listRowBackground(Color.clear)
+                        } header: {
+                            Text("Recommended Downloads")
+                        } footer: {
+                            Text("These are suggestions based on this phone's RAM budget. You can still search for and download any model.")
                         }
                     } else if searchVM.results.isEmpty {
                         Section {
@@ -473,6 +496,9 @@ struct ModelSearchSheet: View {
                     Button("Cancel") { dismiss() }
                         .disabled(searchVM.isDownloading)
                 }
+            }
+            .task {
+                await searchVM.loadRecommendationsIfNeeded()
             }
             .alert("Download Failed", isPresented: Binding(
                 get: { searchVM.downloadError != nil },
@@ -611,7 +637,11 @@ struct ModelDetailSheet: View {
                                 .padding(.vertical, 20)
                         } else {
                             ForEach(viewModel.availableFiles) { file in
-                                GGUFFileRow(file: file, viewModel: viewModel) {
+                                GGUFFileRow(
+                                    file: file,
+                                    compatibility: viewModel.deviceProfile.compatibility(for: file.size),
+                                    viewModel: viewModel
+                                ) {
                                     Task {
                                         await viewModel.downloadFile(file, modelId: model.modelId)
                                     }
@@ -684,6 +714,7 @@ struct StatBadge: View {
 
 struct GGUFFileRow: View {
     let file: GGUFInfo
+    let compatibility: ModelFileCompatibility
     @ObservedObject var viewModel: ModelSearchViewModel
     let downloadAction: () -> Void
     
@@ -705,6 +736,8 @@ struct GGUFFileRow: View {
                         Text(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))
                             .font(.system(size: 12))
                     }
+
+                    CompatibilityBadge(compatibility: compatibility)
                 }
                 .foregroundStyle(.secondary)
             }
@@ -751,12 +784,16 @@ class ModelsViewModel: ObservableObject {
 
 @MainActor
 class ModelSearchViewModel: ObservableObject {
+    @Published private(set) var deviceProfile = DeviceCapabilityInspector.current()
     @Published var results: [HuggingFaceModel] = []
     @Published var isSearching = false
     @Published var selectedModel: HuggingFaceModel?
     
     @Published var availableFiles: [GGUFInfo] = []
     @Published var isLoadingFiles = false
+
+    @Published var recommendations: [ModelRecommendation] = []
+    @Published var isLoadingRecommendations = false
     
     @Published var isDownloading = false
     @Published var downloadingFile: GGUFInfo?
@@ -765,6 +802,7 @@ class ModelSearchViewModel: ObservableObject {
 
     private var searchRequestID = UUID()
     private var filesRequestID = UUID()
+    private var recommendationsRequestID = UUID()
     
     func search(query: String) async {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -809,6 +847,50 @@ class ModelSearchViewModel: ObservableObject {
 
         guard filesRequestID == requestID else { return }
         isLoadingFiles = false
+    }
+
+    func loadRecommendationsIfNeeded() async {
+        guard recommendations.isEmpty, !isLoadingRecommendations else { return }
+
+        let requestID = UUID()
+        recommendationsRequestID = requestID
+        isLoadingRecommendations = true
+        defer {
+            if recommendationsRequestID == requestID {
+                isLoadingRecommendations = false
+            }
+        }
+
+        do {
+            let trendingModels = try await HuggingFaceService.shared.getTrendingModels(limit: 18)
+            guard recommendationsRequestID == requestID else { return }
+
+            var suggestedModels: [ModelRecommendation] = []
+
+            for model in trendingModels {
+                guard recommendationsRequestID == requestID else { return }
+
+                let files = try await HuggingFaceService.shared.getModelFiles(modelId: model.modelId)
+                guard let bestFile = bestRecommendedFile(from: files) else { continue }
+
+                let compatibility = deviceProfile.compatibility(for: bestFile.size)
+                guard compatibility != .tooLarge else { continue }
+
+                suggestedModels.append(
+                    ModelRecommendation(model: model, suggestedFile: bestFile, compatibility: compatibility)
+                )
+
+                if suggestedModels.count == 6 {
+                    break
+                }
+            }
+
+            guard recommendationsRequestID == requestID else { return }
+            recommendations = suggestedModels
+        } catch {
+            guard recommendationsRequestID == requestID else { return }
+            recommendations = []
+        }
     }
     
     func downloadFile(_ file: GGUFInfo, modelId: String) async {
@@ -860,6 +942,289 @@ class ModelSearchViewModel: ObservableObject {
 
         let nsError = error as NSError
         return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
+    }
+
+    private func bestRecommendedFile(from files: [GGUFInfo]) -> GGUFInfo? {
+        files
+            .compactMap { file -> (ModelFileCompatibility, Int, Int64, GGUFInfo)? in
+                let compatibility = deviceProfile.compatibility(for: file.size)
+                guard compatibility != .tooLarge else { return nil }
+                return (
+                    compatibility,
+                    quantizationRank(for: file.quantization),
+                    file.size ?? .max,
+                    file
+                )
+            }
+            .sorted { lhs, rhs in
+                if lhs.0.sortRank != rhs.0.sortRank {
+                    return lhs.0.sortRank < rhs.0.sortRank
+                }
+
+                if lhs.1 != rhs.1 {
+                    return lhs.1 < rhs.1
+                }
+
+                return lhs.2 < rhs.2
+            }
+            .first?
+            .3
+    }
+
+    private func quantizationRank(for quantization: String?) -> Int {
+        switch quantization?.uppercased() {
+        case "Q4_K_M", "Q4_K_S", "Q4_0":
+            return 0
+        case "Q5_K_M", "Q5_K_S", "Q5_0", "Q6_K":
+            return 1
+        case "Q3_K_M", "Q3_K_S", "Q3_K_L", "Q2_K":
+            return 2
+        case "Q8_0", "F16", "FP16", "FP32":
+            return 3
+        default:
+            return 4
+        }
+    }
+}
+
+struct DeviceCapabilityCard: View {
+    let profile: DeviceCapabilityProfile
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(profile.deviceLabel)
+                        .font(.system(size: 18, weight: .semibold))
+
+                    Text("\(profile.formattedPhysicalMemory) RAM • iOS \(profile.systemVersion)")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Image(systemName: "iphone.gen3")
+                    .font(.system(size: 28))
+                    .foregroundStyle(Color.accentColor)
+            }
+
+            Text("Best results on this device are usually GGUF files up to \(profile.formattedRecommendedBudget). Files up to \(profile.formattedSupportedBudget) may still run, but larger ones are likely to be slow, unload often, or fail to fit.")
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+        }
+        .padding(18)
+        .background(
+            RoundedRectangle(cornerRadius: 20)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20)
+                        .stroke(.white.opacity(0.1), lineWidth: 0.5)
+                )
+        )
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+    }
+}
+
+struct RecommendedModelRow: View {
+    let recommendation: ModelRecommendation
+    @ObservedObject var viewModel: ModelSearchViewModel
+
+    var body: some View {
+        Button {
+            viewModel.selectedModel = recommendation.model
+        } label: {
+            HStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(.ultraThinMaterial)
+                        .frame(width: 50, height: 50)
+
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 20))
+                        .foregroundStyle(Color.accentColor)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(recommendation.model.displayName)
+                        .font(.system(size: 16, weight: .medium))
+                        .lineLimit(1)
+
+                    Text(recommendation.suggestedFile.filename)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+
+                    HStack(spacing: 8) {
+                        if let quantization = recommendation.suggestedFile.quantization {
+                            Label(quantization, systemImage: "cpu")
+                                .font(.system(size: 12))
+                        }
+
+                        if let size = recommendation.suggestedFile.size {
+                            Text("•")
+                            Text(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))
+                                .font(.system(size: 12))
+                        }
+
+                        CompatibilityBadge(compatibility: recommendation.compatibility)
+                    }
+                    .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Image(systemName: "chevron.right")
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.vertical, 4)
+        .disabled(viewModel.isDownloading)
+    }
+}
+
+struct CompatibilityBadge: View {
+    let compatibility: ModelFileCompatibility
+
+    var body: some View {
+        Text(compatibility.title)
+            .font(.system(size: 10, weight: .semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                Capsule()
+                    .fill(compatibility.tint.opacity(0.18))
+            )
+            .foregroundStyle(compatibility.tint)
+    }
+}
+
+struct ModelRecommendation: Identifiable {
+    let model: HuggingFaceModel
+    let suggestedFile: GGUFInfo
+    let compatibility: ModelFileCompatibility
+
+    var id: String {
+        "\(model.id)#\(suggestedFile.id)"
+    }
+}
+
+enum ModelFileCompatibility {
+    case recommended
+    case supported
+    case tooLarge
+    case unknown
+
+    var title: String {
+        switch self {
+        case .recommended:
+            return "Recommended"
+        case .supported:
+            return "May Run"
+        case .tooLarge:
+            return "Too Large"
+        case .unknown:
+            return "Unknown"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .recommended:
+            return .green
+        case .supported:
+            return .orange
+        case .tooLarge:
+            return .red
+        case .unknown:
+            return .secondary
+        }
+    }
+
+    var sortRank: Int {
+        switch self {
+        case .recommended:
+            return 0
+        case .supported:
+            return 1
+        case .unknown:
+            return 2
+        case .tooLarge:
+            return 3
+        }
+    }
+}
+
+struct DeviceCapabilityProfile {
+    let machineIdentifier: String
+    let systemVersion: String
+    let physicalMemoryBytes: Int64
+    let recommendedModelBudgetBytes: Int64
+    let supportedModelBudgetBytes: Int64
+
+    var deviceLabel: String {
+        UIDevice.current.userInterfaceIdiom == .pad ? "This iPad" : "This iPhone"
+    }
+
+    var formattedPhysicalMemory: String {
+        ByteCountFormatter.string(fromByteCount: physicalMemoryBytes, countStyle: .memory)
+    }
+
+    var formattedRecommendedBudget: String {
+        ByteCountFormatter.string(fromByteCount: recommendedModelBudgetBytes, countStyle: .file)
+    }
+
+    var formattedSupportedBudget: String {
+        ByteCountFormatter.string(fromByteCount: supportedModelBudgetBytes, countStyle: .file)
+    }
+
+    func compatibility(for fileSize: Int64?) -> ModelFileCompatibility {
+        guard let fileSize else { return .unknown }
+
+        if fileSize <= recommendedModelBudgetBytes {
+            return .recommended
+        }
+
+        if fileSize <= supportedModelBudgetBytes {
+            return .supported
+        }
+
+        return .tooLarge
+    }
+}
+
+enum DeviceCapabilityInspector {
+    static func current() -> DeviceCapabilityProfile {
+        let physicalMemory = Int64(ProcessInfo.processInfo.physicalMemory)
+        let recommendedBudget = max(
+            min(Int64(Double(physicalMemory) * 0.30), physicalMemory - 3_000_000_000),
+            1_500_000_000
+        )
+        let supportedBudget = max(
+            min(Int64(Double(physicalMemory) * 0.42), physicalMemory - 2_000_000_000),
+            recommendedBudget
+        )
+
+        return DeviceCapabilityProfile(
+            machineIdentifier: machineIdentifier(),
+            systemVersion: UIDevice.current.systemVersion,
+            physicalMemoryBytes: physicalMemory,
+            recommendedModelBudgetBytes: recommendedBudget,
+            supportedModelBudgetBytes: supportedBudget
+        )
+    }
+
+    private static func machineIdentifier() -> String {
+        var systemInfo = utsname()
+        uname(&systemInfo)
+
+        return withUnsafePointer(to: &systemInfo.machine) { pointer in
+            pointer.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: systemInfo.machine)) { charPointer in
+                String(cString: charPointer)
+            }
+        }
     }
 }
 

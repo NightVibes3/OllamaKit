@@ -384,10 +384,12 @@ private final class BackendEngine {
         let sampler = try makeSampler(parameters: parameters)
         defer { llama_sampler_free(sampler) }
 
-        var generatedText = ""
+        var rawGeneratedText = ""
+        var streamedText = ""
         var generatedTokenCount = 0
         var currentPosition = Int32(boundedPromptTokens.count)
         var wasCancelled = false
+        var stoppedByStopSequence = false
         let maxNewTokens = normalizedMaxNewTokens(promptTokens: boundedPromptTokens.count, requestedMaxTokens: parameters.maxTokens)
 
         while generatedTokenCount < maxNewTokens {
@@ -405,8 +407,22 @@ private final class BackendEngine {
 
             let piece = tokenToPiece(token)
             if !piece.isEmpty {
-                generatedText += piece
-                onToken(piece)
+                rawGeneratedText += piece
+
+                let stopHandling = applyStopSequences(to: rawGeneratedText, stopSequences: parameters.stopSequences)
+                let nextVisibleText = stopHandling.visibleText
+
+                if nextVisibleText.count > streamedText.count {
+                    let deltaStart = nextVisibleText.index(nextVisibleText.startIndex, offsetBy: streamedText.count)
+                    let delta = String(nextVisibleText[deltaStart...])
+                    streamedText = nextVisibleText
+                    onToken(delta)
+                }
+
+                if stopHandling.shouldStop {
+                    stoppedByStopSequence = true
+                    break
+                }
             }
 
             llamaBatchClear(&batch)
@@ -422,9 +438,10 @@ private final class BackendEngine {
 
         llama_synchronize(context)
         let elapsed = max(CFAbsoluteTimeGetCurrent() - startedAt, 0.001)
+        let finalText = stoppedByStopSequence ? streamedText : rawGeneratedText
 
         return GenerationResult(
-            text: generatedText,
+            text: finalText,
             tokensGenerated: generatedTokenCount,
             promptTokens: boundedPromptTokens.count,
             generationTime: elapsed,
@@ -580,6 +597,46 @@ private final class BackendEngine {
         }
 
         return Array(UnsafeBufferPointer(start: buffer, count: Int(count)))
+    }
+
+    private func applyStopSequences(to text: String, stopSequences: [String]) -> (visibleText: String, shouldStop: Bool) {
+        let cleanedStopSequences = stopSequences.filter { !$0.isEmpty }
+        guard !cleanedStopSequences.isEmpty else {
+            return (text, false)
+        }
+
+        let matches = cleanedStopSequences.compactMap { sequence in
+            text.range(of: sequence).map { range in
+                (range, sequence)
+            }
+        }
+
+        if let earliestMatch = matches.min(by: { lhs, rhs in
+            lhs.0.lowerBound < rhs.0.lowerBound
+        }) {
+            return (String(text[..<earliestMatch.0.lowerBound]), true)
+        }
+
+        let withheldCount = cleanedStopSequences.reduce(into: 0) { partialResult, sequence in
+            let maxCandidateLength = min(sequence.count - 1, text.count)
+            guard maxCandidateLength > 0 else { return }
+
+            for length in stride(from: maxCandidateLength, through: 1, by: -1) {
+                let suffixStart = text.index(text.endIndex, offsetBy: -length)
+                let suffix = String(text[suffixStart...])
+                if sequence.hasPrefix(suffix) {
+                    partialResult = max(partialResult, length)
+                    break
+                }
+            }
+        }
+
+        guard withheldCount > 0 else {
+            return (text, false)
+        }
+
+        let visibleEnd = text.index(text.endIndex, offsetBy: -withheldCount)
+        return (String(text[..<visibleEnd]), false)
     }
 }
 

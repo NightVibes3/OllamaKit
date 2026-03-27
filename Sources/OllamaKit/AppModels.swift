@@ -248,6 +248,7 @@ struct ModelParameters {
     var topK: Int
     var repeatPenalty: Double
     var maxTokens: Int
+    var stopSequences: [String] = []
 
     static var `default`: ModelParameters {
         let settings = AppSettings.shared
@@ -267,6 +268,15 @@ struct PromptTurn: Sendable {
 }
 
 enum PromptComposer {
+    static let defaultChatStopSequences = [
+        "\nUser:",
+        "\nAssistant:",
+        "\nSystem:",
+        "\nHuman:",
+        "\nMe:",
+        "\nBot:"
+    ]
+
     static func compose(
         systemPrompt: String? = nil,
         messages: [PromptTurn],
@@ -293,6 +303,15 @@ enum PromptComposer {
             .compactMap { $0 }
             .joined(separator: "\n\n")
             .nonEmpty ?? ""
+    }
+
+    static func guardedSystemPrompt(_ systemPrompt: String?) -> String? {
+        let guardInstruction = "Reply with only the assistant's next message. Do not continue the conversation as the user. Do not include speaker labels such as User:, Assistant:, Human:, or Me:."
+
+        return [systemPrompt?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty, guardInstruction]
+            .compactMap { $0 }
+            .joined(separator: "\n\n")
+            .nonEmpty
     }
 }
 

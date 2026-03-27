@@ -502,6 +502,9 @@ class ChatViewModel: ObservableObject {
             messages: existingPromptTurns + [PromptTurn(role: userMessage.roleValue, content: userMessage.content)],
             appendAssistantCue: true
         )
+
+        var parameters = ModelParameters.default
+        parameters.stopSequences = PromptComposer.defaultChatStopSequences
         
         do {
             // Validate model path before loading
@@ -525,7 +528,8 @@ class ChatViewModel: ObservableObject {
             
             let result = try await ModelRunner.shared.generate(
                 prompt: conversationPrompt,
-                systemPrompt: session.systemPrompt
+                systemPrompt: PromptComposer.guardedSystemPrompt(session.systemPrompt),
+                parameters: parameters
             ) { token in
                 guard shouldStreamInUI else { return }
                 generatedText += token

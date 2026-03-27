@@ -456,12 +456,13 @@ final class ServerManager {
         Task {
             do {
                 let model = try await prepareModel(named: modelName)
-                let parameters = modelParameters(from: json, apiStyle: .ollama)
+                var parameters = modelParameters(from: json, apiStyle: .ollama)
+                parameters.stopSequences.append(contentsOf: PromptComposer.defaultChatStopSequences.filter { !parameters.stopSequences.contains($0) })
 
                 if stream {
                     await streamLegacyChat(
                         prompt: conversationPrompt,
-                        systemPrompt: systemPrompt.nonEmpty,
+                        systemPrompt: PromptComposer.guardedSystemPrompt(systemPrompt.nonEmpty),
                         model: legacyModelName(for: model),
                         parameters: parameters,
                         on: connection
@@ -469,7 +470,7 @@ final class ServerManager {
                 } else {
                     await completeLegacyChat(
                         prompt: conversationPrompt,
-                        systemPrompt: systemPrompt.nonEmpty,
+                        systemPrompt: PromptComposer.guardedSystemPrompt(systemPrompt.nonEmpty),
                         model: legacyModelName(for: model),
                         parameters: parameters,
                         on: connection
@@ -569,7 +570,8 @@ final class ServerManager {
         Task {
             do {
                 let model = try await prepareModel(named: modelName)
-                let parameters = modelParameters(from: json, apiStyle: .openAI)
+                var parameters = modelParameters(from: json, apiStyle: .openAI)
+                parameters.stopSequences.append(contentsOf: PromptComposer.defaultChatStopSequences.filter { !parameters.stopSequences.contains($0) })
                 let requestId = "chatcmpl-\(UUID().uuidString.lowercased())"
                 let createdAt = Int(Date().timeIntervalSince1970)
                 let responseModel = openAIModelIdentifier(for: model)
@@ -580,7 +582,7 @@ final class ServerManager {
                         createdAt: createdAt,
                         model: responseModel,
                         prompt: prompt,
-                        systemPrompt: systemPrompt.nonEmpty,
+                        systemPrompt: PromptComposer.guardedSystemPrompt(systemPrompt.nonEmpty),
                         parameters: parameters,
                         on: connection
                     )
@@ -590,7 +592,7 @@ final class ServerManager {
                         createdAt: createdAt,
                         model: responseModel,
                         prompt: prompt,
-                        systemPrompt: systemPrompt.nonEmpty,
+                        systemPrompt: PromptComposer.guardedSystemPrompt(systemPrompt.nonEmpty),
                         parameters: parameters,
                         on: connection
                     )
@@ -1216,6 +1218,12 @@ final class ServerManager {
 
         if let maxTokens = extractInt(forKeys: maxTokenKeys, from: parameterSource) {
             parameters.maxTokens = maxTokens
+        }
+
+        if let stopString = parameterSource["stop"] as? String, !stopString.isEmpty {
+            parameters.stopSequences = [stopString]
+        } else if let stopList = parameterSource["stop"] as? [String] {
+            parameters.stopSequences = stopList.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         }
 
         return parameters
