@@ -58,13 +58,7 @@ jobs:
           exit 1
         fi
 
-        IFS=$'\n' sorted_candidates=($(printf '%s\n' "${candidates[@]}" | python3 -c 'import re, sys
-def key(value: str):
-    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\\d+)", value.strip())]
-values = [line.strip() for line in sys.stdin if line.strip()]
-for value in sorted(values, key=key, reverse=True):
-    print(value)
-'))
+        IFS=$'\n' sorted_candidates=($(printf '%s\n' "${candidates[@]}" | python3 -c "import re,sys; key=lambda value: [int(part) if part.isdigit() else part.lower() for part in re.split(r'(\\d+)', value.strip())]; values=[line.strip() for line in sys.stdin if line.strip()]; print('\\n'.join(sorted(values, key=key, reverse=True)))"))
         unset IFS
         selected_xcode=""
 
