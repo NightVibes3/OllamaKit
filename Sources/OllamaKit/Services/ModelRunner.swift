@@ -65,6 +65,7 @@ final class ModelRunner: ObservableObject {
     func generate(
         prompt: String,
         systemPrompt: String? = nil,
+        conversationTurns: [ConversationTurn] = [],
         parameters: ModelParameters = .appDefault,
         onToken: @escaping (String) -> Void
     ) async throws -> GenerationResult {
@@ -85,6 +86,7 @@ final class ModelRunner: ObservableObject {
                 catalogId: activeCatalogId,
                 prompt: prompt,
                 systemPrompt: systemPrompt,
+                conversationTurns: conversationTurns,
                 parameters: parameters,
                 runtimePreferences: runtime
             )

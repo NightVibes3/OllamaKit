@@ -283,6 +283,187 @@ public struct ConversationTurn: Codable, Hashable, Sendable {
     }
 }
 
+public enum ConversationPrompting {
+    public static let defaultChatStopSequences = [
+        "User:",
+        "\nUser:",
+        "Assistant:",
+        "\nAssistant:",
+        "System:",
+        "\nSystem:",
+        "Human:",
+        "\nHuman:",
+        "Me:",
+        "\nMe:",
+        "Bot:",
+        "\nBot:"
+    ]
+
+    public static let assistantGuardInstruction =
+        "Reply with only the assistant's next message. Do not continue the conversation as the user. Do not include speaker labels such as User:, Assistant:, Human:, Me:, or Bot:."
+
+    public static func normalizedTurns(_ turns: [ConversationTurn]) -> [ConversationTurn] {
+        turns.compactMap { turn in
+            let role = normalizedRole(for: turn.role)
+            let content = turn.content.trimmedForLookup
+            guard let role, !content.isEmpty else { return nil }
+            return ConversationTurn(role: role, content: content)
+        }
+    }
+
+    public static func guardedSystemPrompt(_ systemPrompt: String?, includeGuard: Bool) -> String? {
+        let trimmedSystemPrompt = systemPrompt?.trimmedForLookup.nonEmpty
+        guard includeGuard else {
+            return trimmedSystemPrompt
+        }
+
+        return [trimmedSystemPrompt, assistantGuardInstruction]
+            .compactMap { $0 }
+            .joined(separator: "\n\n")
+            .nonEmpty
+    }
+
+    public static func transcriptPrompt(
+        systemPrompt: String?,
+        turns: [ConversationTurn],
+        appendAssistantCue: Bool
+    ) -> String {
+        let systemBlock = guardedSystemPrompt(systemPrompt, includeGuard: true)
+            .map { "System:\n\($0)" }
+
+        let conversation = normalizedTurns(turns)
+            .compactMap { turn -> String? in
+                switch turn.role {
+                case "system":
+                    return "System:\n\(turn.content)"
+                case "assistant":
+                    return "Assistant:\n\(turn.content)"
+                case "user":
+                    return "User:\n\(turn.content)"
+                default:
+                    return nil
+                }
+            }
+            .joined(separator: "\n\n")
+            .nonEmpty
+
+        let assistantCue = appendAssistantCue ? "Assistant:\n" : nil
+
+        return [systemBlock, conversation, assistantCue]
+            .compactMap { $0 }
+            .joined(separator: "\n\n")
+            .nonEmpty ?? ""
+    }
+
+    public static func promptForAssistant(
+        systemPrompt: String?,
+        turns: [ConversationTurn]
+    ) -> String {
+        transcriptPrompt(
+            systemPrompt: systemPrompt,
+            turns: turns,
+            appendAssistantCue: true
+        )
+    }
+
+    public static func mergedStopSequences(_ stopSequences: [String], includeDefaultChatStops: Bool) -> [String] {
+        let candidateStops = stopSequences + (includeDefaultChatStops ? defaultChatStopSequences : [])
+        var deduplicated: [String] = []
+        var seen = Set<String>()
+
+        for stop in candidateStops {
+            guard !stop.isEmpty, seen.insert(stop).inserted else { continue }
+            deduplicated.append(stop)
+        }
+
+        return deduplicated
+    }
+
+    public static func visibleAssistantText(
+        from rawText: String,
+        stopSequences: [String]
+    ) -> (visibleText: String, shouldStop: Bool) {
+        let sanitizedText = stripLeadingAssistantLabels(from: rawText)
+        guard !stopSequences.isEmpty else {
+            return (sanitizedText, false)
+        }
+
+        let matches = stopSequences.compactMap { sequence in
+            sanitizedText.range(of: sequence).map { range in
+                (range, sequence)
+            }
+        }
+
+        if let earliestMatch = matches.min(by: { lhs, rhs in
+            lhs.0.lowerBound < rhs.0.lowerBound
+        }) {
+            return (String(sanitizedText[..<earliestMatch.0.lowerBound]), true)
+        }
+
+        let withheldCount = stopSequences.reduce(into: 0) { partialResult, sequence in
+            let maxCandidateLength = min(sequence.count - 1, sanitizedText.count)
+            guard maxCandidateLength > 0 else { return }
+
+            for length in stride(from: maxCandidateLength, through: 1, by: -1) {
+                let suffixStart = sanitizedText.index(sanitizedText.endIndex, offsetBy: -length)
+                let suffix = String(sanitizedText[suffixStart...])
+                if sequence.hasPrefix(suffix) {
+                    partialResult = max(partialResult, length)
+                    break
+                }
+            }
+        }
+
+        guard withheldCount > 0 else {
+            return (sanitizedText, false)
+        }
+
+        let visibleEnd = sanitizedText.index(sanitizedText.endIndex, offsetBy: -withheldCount)
+        return (String(sanitizedText[..<visibleEnd]), false)
+    }
+
+    public static func finalizedAssistantText(
+        from rawText: String,
+        stopSequences: [String]
+    ) -> String {
+        visibleAssistantText(from: rawText, stopSequences: stopSequences).visibleText.trimmedForLookup
+    }
+
+    private static func normalizedRole(for role: String) -> String? {
+        switch role.trimmedForLookup.lowercased() {
+        case "system", "developer":
+            return "system"
+        case "assistant", "bot":
+            return "assistant"
+        case "user", "human", "me":
+            return "user"
+        default:
+            return nil
+        }
+    }
+
+    private static func stripLeadingAssistantLabels(from text: String) -> String {
+        var current = text
+
+        while true {
+            let trimmed = current.drop(while: { $0.isWhitespace })
+            let lowered = trimmed.lowercased()
+
+            if lowered.hasPrefix("assistant:") {
+                current = String(trimmed.dropFirst("assistant:".count))
+                continue
+            }
+
+            if lowered.hasPrefix("bot:") {
+                current = String(trimmed.dropFirst("bot:".count))
+                continue
+            }
+
+            return String(trimmed)
+        }
+    }
+}
+
 public struct SamplingParameters: Codable, Hashable, Sendable {
     public var temperature: Double
     public var topP: Double
@@ -319,6 +500,7 @@ public struct InferenceRequest: Sendable {
     public let catalogId: String
     public let prompt: String
     public let systemPrompt: String?
+    public let conversationTurns: [ConversationTurn]
     public let parameters: SamplingParameters
     public let runtimePreferences: RuntimePreferences
 
@@ -326,14 +508,20 @@ public struct InferenceRequest: Sendable {
         catalogId: String,
         prompt: String,
         systemPrompt: String? = nil,
+        conversationTurns: [ConversationTurn] = [],
         parameters: SamplingParameters = .default,
         runtimePreferences: RuntimePreferences
     ) {
         self.catalogId = catalogId
         self.prompt = prompt
         self.systemPrompt = systemPrompt
+        self.conversationTurns = ConversationPrompting.normalizedTurns(conversationTurns)
         self.parameters = parameters
         self.runtimePreferences = runtimePreferences
+    }
+
+    public var isChatRequest: Bool {
+        !conversationTurns.isEmpty
     }
 }
 
@@ -427,7 +615,7 @@ public enum InferenceError: Error, LocalizedError, Sendable {
 
 public enum CoreMLPackageLocator {
     public static func looksRunnable(packageRootPath: String?) -> Bool {
-        guard let packageRootPath?.nonEmpty else { return false }
+        guard let packageRootPath = packageRootPath?.nonEmpty else { return false }
         return runtimeModelRootURL(packageRootURL: URL(fileURLWithPath: packageRootPath)) != nil
     }
 

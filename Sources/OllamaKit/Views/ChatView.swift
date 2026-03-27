@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import OllamaCore
 
 struct ChatView: View {
     @Environment(\.modelContext) private var modelContext
@@ -519,9 +520,9 @@ class ChatViewModel: ObservableObject {
             return
         }
 
-        let existingPromptTurns = session.orderedMessages
+        let conversationTurns = session.orderedMessages
             .filter { !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            .map { PromptTurn(role: $0.roleValue, content: $0.content) }
+            .map { ConversationTurn(role: $0.roleValue, content: $0.content) }
         
         let userMessage = ChatMessage(role: .user, content: content)
         userMessage.session = session
@@ -541,15 +542,7 @@ class ChatViewModel: ObservableObject {
             isGenerating = false
         }
 
-        let conversationPrompt = PromptComposer.compose(
-            systemPrompt: nil,
-            messages: existingPromptTurns + [PromptTurn(role: userMessage.roleValue, content: userMessage.content)],
-            appendAssistantCue: true
-        )
-
-        var parameters = ModelParameters.appDefault
-        parameters.stopSequences = PromptComposer.defaultChatStopSequences
-        let guardedSystemPrompt = PromptComposer.guardedSystemPrompt(session.systemPrompt)
+        let parameters = ModelParameters.appDefault
         
         do {
             try await ModelRunner.shared.loadModel(
@@ -562,8 +555,9 @@ class ChatViewModel: ObservableObject {
             let shouldStreamInUI = AppSettings.shared.streamingEnabled
 
             let result = try await ModelRunner.shared.generate(
-                prompt: conversationPrompt,
-                systemPrompt: guardedSystemPrompt,
+                prompt: "",
+                systemPrompt: session.systemPrompt,
+                conversationTurns: conversationTurns + [ConversationTurn(role: userMessage.roleValue, content: userMessage.content)],
                 parameters: parameters
             ) { token in
                 guard shouldStreamInUI else { return }

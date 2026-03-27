@@ -158,8 +158,24 @@ final class AppleFoundationBackend: InferenceBackend, @unchecked Sendable {
         let requestID = UUID()
         activeRequestID = requestID
 
-        let normalizedPrompt = request.prompt.trimmedForLookup
-        let instructions = request.systemPrompt?.trimmedForLookup.nonEmpty
+        let normalizedPrompt: String
+        if request.isChatRequest {
+            normalizedPrompt = ConversationPrompting.promptForAssistant(
+                systemPrompt: nil,
+                turns: request.conversationTurns
+            )
+        } else {
+            normalizedPrompt = request.prompt.trimmedForLookup
+        }
+
+        let instructions = ConversationPrompting.guardedSystemPrompt(
+            request.systemPrompt,
+            includeGuard: request.isChatRequest
+        )
+        let chatStopSequences = ConversationPrompting.mergedStopSequences(
+            request.parameters.stopSequences,
+            includeDefaultChatStops: request.isChatRequest
+        )
 
         let task = Task<InferenceResult, Error> {
             let startedAt = CFAbsoluteTimeGetCurrent()
@@ -172,10 +188,16 @@ final class AppleFoundationBackend: InferenceBackend, @unchecked Sendable {
 
             let response = try await session.respond(to: normalizedPrompt)
             try Task.checkCancellation()
+            let responseText = request.isChatRequest
+                ? ConversationPrompting.finalizedAssistantText(
+                    from: response.content,
+                    stopSequences: chatStopSequences
+                )
+                : response.content.trimmedForLookup
 
             let elapsed = max(CFAbsoluteTimeGetCurrent() - startedAt, 0.001)
             return InferenceResult(
-                text: response.content.trimmedForLookup,
+                text: responseText,
                 tokensGenerated: 0,
                 promptTokens: 0,
                 generationTime: elapsed,
@@ -371,7 +393,10 @@ final class CoreMLPackageBackend: InferenceBackend, @unchecked Sendable {
             addGenerationPrompt: true
         )
 
-        let stopSequences = request.parameters.stopSequences
+        let stopSequences = ConversationPrompting.mergedStopSequences(
+            request.parameters.stopSequences,
+            includeDefaultChatStops: request.isChatRequest
+        )
         let generationTask = Task<InferenceResult, Error> {
             var accumulatedText = ""
             var emittedCharacters = 0
@@ -393,7 +418,16 @@ final class CoreMLPackageBackend: InferenceBackend, @unchecked Sendable {
                     guard !tokenText.isEmpty else { return }
 
                     accumulatedText.append(tokenText)
-                    let trimmed = trimmedForStopSequences(accumulatedText, stopSequences: stopSequences)
+                    let trimmed: (visibleText: String, didMatchStopSequence: Bool)
+                    if request.isChatRequest {
+                        let visible = ConversationPrompting.visibleAssistantText(
+                            from: accumulatedText,
+                            stopSequences: stopSequences
+                        )
+                        trimmed = (visible.visibleText, visible.shouldStop)
+                    } else {
+                        trimmed = trimmedForStopSequences(accumulatedText, stopSequences: stopSequences)
+                    }
 
                     if trimmed.didMatchStopSequence {
                         manager.AbortGeneration(Code: 901)
@@ -411,7 +445,15 @@ final class CoreMLPackageBackend: InferenceBackend, @unchecked Sendable {
             )
 
             let elapsed = max(CFAbsoluteTimeGetCurrent() - startedAt, 0.001)
-            let finalText = trimmedForStopSequences(accumulatedText, stopSequences: stopSequences).visibleText
+            let finalText: String
+            if request.isChatRequest {
+                finalText = ConversationPrompting.finalizedAssistantText(
+                    from: accumulatedText,
+                    stopSequences: stopSequences
+                )
+            } else {
+                finalText = trimmedForStopSequences(accumulatedText, stopSequences: stopSequences).visibleText
+            }
 
             return InferenceResult(
                 text: finalText,
@@ -499,18 +541,39 @@ final class CoreMLPackageBackend: InferenceBackend, @unchecked Sendable {
     private func buildChatMessages(from request: InferenceRequest) -> [AnemllCore.Tokenizer.ChatMessage] {
         var messages: [AnemllCore.Tokenizer.ChatMessage] = []
 
-        if let systemPrompt = request.systemPrompt?.trimmedForLookup.nonEmpty {
+        if let systemPrompt = ConversationPrompting.guardedSystemPrompt(
+            request.systemPrompt,
+            includeGuard: request.isChatRequest
+        ) {
             messages.append(.system(systemPrompt))
         }
 
-        let parsedTurns = parseTranscriptPrompt(request.prompt)
-        if parsedTurns.isEmpty {
-            let prompt = request.prompt.trimmedForLookup
-            if let nonEmptyPrompt = prompt.nonEmpty {
-                messages.append(.user(nonEmptyPrompt))
+        let structuredTurns = ConversationPrompting.normalizedTurns(request.conversationTurns)
+        if !structuredTurns.isEmpty {
+            for turn in structuredTurns {
+                switch turn.role {
+                case "system":
+                    messages.append(.system(turn.content))
+                case "assistant":
+                    messages.append(.assistant(turn.content))
+                case "user":
+                    messages.append(.user(turn.content))
+                default:
+                    break
+                }
             }
-        } else {
+            return messages
+        }
+
+        let parsedTurns = parseTranscriptPrompt(request.prompt)
+        if !parsedTurns.isEmpty {
             messages.append(contentsOf: parsedTurns)
+            return messages
+        }
+
+        let prompt = request.prompt.trimmedForLookup
+        if let nonEmptyPrompt = prompt.nonEmpty {
+            messages.append(.user(nonEmptyPrompt))
         }
 
         return messages

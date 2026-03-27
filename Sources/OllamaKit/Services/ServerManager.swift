@@ -330,7 +330,7 @@ final class ServerManager {
 
     private func handleLegacyListModels(on connection: NWConnection) {
         Task {
-            let models = await MainActor.run { ModelStorage.shared.allSnapshots().filter(\.isServerExposed) }
+            let models = await serverModels()
             let body: [String: Any] = [
                 "models": models.map { snapshot in
                     let identifier = legacyModelName(for: snapshot)
@@ -353,7 +353,7 @@ final class ServerManager {
 
     private func handleOpenAIListModels(on connection: NWConnection) {
         Task {
-            let models = await MainActor.run { ModelStorage.shared.allSnapshots().filter(\.isServerExposed) }
+            let models = await serverModels()
             let createdAt = Int(Date().timeIntervalSince1970)
             let body: [String: Any] = [
                 "object": "list",
@@ -427,40 +427,36 @@ final class ServerManager {
             .compactMap { extractStringContent(from: $0["content"]) }
             .joined(separator: "\n\n")
 
-        let conversationPrompt = PromptComposer.compose(
-            messages: messages.compactMap { message in
-                guard let role = message["role"] as? String,
-                      !isInstructionRole(role),
-                      let content = extractStringContent(from: message["content"])
-                else {
-                    return nil
-                }
+        let conversationTurns = messages.compactMap { message -> ConversationTurn? in
+            guard let role = message["role"] as? String,
+                  !isInstructionRole(role),
+                  let content = extractStringContent(from: message["content"])
+            else {
+                return nil
+            }
 
-                return PromptTurn(role: role, content: content)
-            },
-            appendAssistantCue: true
-        )
+            return ConversationTurn(role: role, content: content)
+        }
 
         let stream = json["stream"] as? Bool ?? true
 
         Task {
             do {
                 let model = try await prepareModel(named: modelName)
-                var parameters = modelParameters(from: json, apiStyle: .ollama)
-                parameters.stopSequences.append(contentsOf: PromptComposer.defaultChatStopSequences.filter { !parameters.stopSequences.contains($0) })
+                let parameters = modelParameters(from: json, apiStyle: .ollama)
 
                 if stream {
                     await streamLegacyChat(
-                        prompt: conversationPrompt,
-                        systemPrompt: PromptComposer.guardedSystemPrompt(systemPrompt.nonEmpty),
+                        conversationTurns: conversationTurns,
+                        systemPrompt: systemPrompt.nonEmpty,
                         model: legacyModelName(for: model),
                         parameters: parameters,
                         on: connection
                     )
                 } else {
                     await completeLegacyChat(
-                        prompt: conversationPrompt,
-                        systemPrompt: PromptComposer.guardedSystemPrompt(systemPrompt.nonEmpty),
+                        conversationTurns: conversationTurns,
+                        systemPrompt: systemPrompt.nonEmpty,
                         model: legacyModelName(for: model),
                         parameters: parameters,
                         on: connection
@@ -541,27 +537,23 @@ final class ServerManager {
             .compactMap { extractStringContent(from: $0["content"]) }
             .joined(separator: "\n\n")
 
-        let prompt = PromptComposer.compose(
-            messages: messages.compactMap { message in
-                guard let role = message["role"] as? String,
-                      !isInstructionRole(role),
-                      let content = extractStringContent(from: message["content"])
-                else {
-                    return nil
-                }
+        let conversationTurns = messages.compactMap { message -> ConversationTurn? in
+            guard let role = message["role"] as? String,
+                  !isInstructionRole(role),
+                  let content = extractStringContent(from: message["content"])
+            else {
+                return nil
+            }
 
-                return PromptTurn(role: role, content: content)
-            },
-            appendAssistantCue: true
-        )
+            return ConversationTurn(role: role, content: content)
+        }
 
         let stream = json["stream"] as? Bool ?? false
 
         Task {
             do {
                 let model = try await prepareModel(named: modelName)
-                var parameters = modelParameters(from: json, apiStyle: .openAI)
-                parameters.stopSequences.append(contentsOf: PromptComposer.defaultChatStopSequences.filter { !parameters.stopSequences.contains($0) })
+                let parameters = modelParameters(from: json, apiStyle: .openAI)
                 let requestId = "chatcmpl-\(UUID().uuidString.lowercased())"
                 let createdAt = Int(Date().timeIntervalSince1970)
                 let responseModel = openAIModelIdentifier(for: model)
@@ -571,8 +563,8 @@ final class ServerManager {
                         requestId: requestId,
                         createdAt: createdAt,
                         model: responseModel,
-                        prompt: prompt,
-                        systemPrompt: PromptComposer.guardedSystemPrompt(systemPrompt.nonEmpty),
+                        conversationTurns: conversationTurns,
+                        systemPrompt: systemPrompt.nonEmpty,
                         parameters: parameters,
                         on: connection
                     )
@@ -581,8 +573,8 @@ final class ServerManager {
                         requestId: requestId,
                         createdAt: createdAt,
                         model: responseModel,
-                        prompt: prompt,
-                        systemPrompt: PromptComposer.guardedSystemPrompt(systemPrompt.nonEmpty),
+                        conversationTurns: conversationTurns,
+                        systemPrompt: systemPrompt.nonEmpty,
                         parameters: parameters,
                         on: connection
                     )
@@ -725,7 +717,7 @@ final class ServerManager {
             let models: [[String: Any]]
 
             if ModelRunner.shared.isLoaded, let activeCatalogId = ModelRunner.shared.activeCatalogId {
-                let snapshot = await MainActor.run { ModelStorage.shared.snapshot(name: activeCatalogId) }
+                let snapshot = await serverModel(named: activeCatalogId)
                 let expiresAt: Any = AppSettings.shared.keepModelInMemory
                     ? NSNull()
                     : iso8601String(from: Date().addingTimeInterval(TimeInterval(AppSettings.shared.autoOffloadMinutes * 60)))
@@ -747,7 +739,7 @@ final class ServerManager {
     }
 
     private func prepareModel(named modelName: String) async throws -> ModelSnapshot {
-        guard let model = await MainActor.run(body: { ModelStorage.shared.snapshot(name: modelName) }) else {
+        guard let model = await serverModel(named: modelName) else {
             throw NSError(domain: "ServerManager", code: 404, userInfo: [NSLocalizedDescriptionKey: "Model not found"])
         }
 
@@ -762,6 +754,37 @@ final class ServerManager {
         )
 
         return model
+    }
+
+    private func serverModels() async -> [ModelSnapshot] {
+        do {
+            let entries = try await RuntimeCoordinator.shared.availableEntries(
+                contextLength: AppSettings.shared.defaultContextLength
+            )
+            return entries
+                .map { ModelSnapshot(entry: $0) }
+                .filter(\.isServerExposed)
+        } catch {
+            print("Failed to load server models from runtime registry: \(error)")
+            return []
+        }
+    }
+
+    private func serverModel(named modelName: String) async -> ModelSnapshot? {
+        do {
+            guard let entry = try await RuntimeCoordinator.shared.resolveModelReference(
+                modelName,
+                contextLength: AppSettings.shared.defaultContextLength
+            ) else {
+                return nil
+            }
+
+            let snapshot = ModelSnapshot(entry: entry)
+            return snapshot.isServerExposed ? snapshot : nil
+        } catch {
+            print("Failed to resolve server model '\(modelName)': \(error)")
+            return nil
+        }
     }
 
     private func streamLegacyGenerate(
@@ -839,7 +862,7 @@ final class ServerManager {
     }
 
     private func streamLegacyChat(
-        prompt: String,
+        conversationTurns: [ConversationTurn],
         systemPrompt: String?,
         model: String,
         parameters: ModelParameters,
@@ -848,7 +871,12 @@ final class ServerManager {
         sendStreamHeaders(contentType: "application/x-ndjson", on: connection)
 
         do {
-            let result = try await ModelRunner.shared.generate(prompt: prompt, systemPrompt: systemPrompt, parameters: parameters) { [self] token in
+            let result = try await ModelRunner.shared.generate(
+                prompt: "",
+                systemPrompt: systemPrompt,
+                conversationTurns: conversationTurns,
+                parameters: parameters
+            ) { [self] token in
                 let chunk: [String: Any] = [
                     "model": model,
                     "created_at": self.iso8601String(from: Date()),
@@ -888,14 +916,19 @@ final class ServerManager {
     }
 
     private func completeLegacyChat(
-        prompt: String,
+        conversationTurns: [ConversationTurn],
         systemPrompt: String?,
         model: String,
         parameters: ModelParameters,
         on connection: NWConnection
     ) async {
         do {
-            let result = try await ModelRunner.shared.generate(prompt: prompt, systemPrompt: systemPrompt, parameters: parameters) { _ in }
+            let result = try await ModelRunner.shared.generate(
+                prompt: "",
+                systemPrompt: systemPrompt,
+                conversationTurns: conversationTurns,
+                parameters: parameters
+            ) { _ in }
 
             sendJSONResponse(
                 status: 200,
@@ -1006,7 +1039,7 @@ final class ServerManager {
         requestId: String,
         createdAt: Int,
         model: String,
-        prompt: String,
+        conversationTurns: [ConversationTurn],
         systemPrompt: String?,
         parameters: ModelParameters,
         on connection: NWConnection
@@ -1027,7 +1060,12 @@ final class ServerManager {
         sendSSEChunk(data: roleChunk, on: connection, closeAfterSend: false)
 
         do {
-            _ = try await ModelRunner.shared.generate(prompt: prompt, systemPrompt: systemPrompt, parameters: parameters) { token in
+            _ = try await ModelRunner.shared.generate(
+                prompt: "",
+                systemPrompt: systemPrompt,
+                conversationTurns: conversationTurns,
+                parameters: parameters
+            ) { token in
                 let chunk: [String: Any] = [
                     "id": requestId,
                     "object": "chat.completion.chunk",
@@ -1065,13 +1103,18 @@ final class ServerManager {
         requestId: String,
         createdAt: Int,
         model: String,
-        prompt: String,
+        conversationTurns: [ConversationTurn],
         systemPrompt: String?,
         parameters: ModelParameters,
         on connection: NWConnection
     ) async {
         do {
-            let result = try await ModelRunner.shared.generate(prompt: prompt, systemPrompt: systemPrompt, parameters: parameters) { _ in }
+            let result = try await ModelRunner.shared.generate(
+                prompt: "",
+                systemPrompt: systemPrompt,
+                conversationTurns: conversationTurns,
+                parameters: parameters
+            ) { _ in }
             sendJSONResponse(
                 status: 200,
                 body: [

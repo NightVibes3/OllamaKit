@@ -108,7 +108,9 @@ final class GGUFBackend: InferenceBackend, @unchecked Sendable {
         }
 
         cancelAutoOffload()
-        let effectivePrompt = buildEffectivePrompt(prompt: request.prompt, systemPrompt: request.systemPrompt)
+        let isChatRequest = request.isChatRequest
+        let effectivePrompt = buildEffectivePrompt(request: request)
+        let effectiveParameters = effectiveParameters(for: request)
 
         let result: InferenceResult = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<InferenceResult, Error>) in
             queue.async {
@@ -122,7 +124,8 @@ final class GGUFBackend: InferenceBackend, @unchecked Sendable {
                 do {
                     let result = try backend.generate(
                         prompt: effectivePrompt,
-                        parameters: request.parameters,
+                        parameters: effectiveParameters,
+                        treatOutputAsChat: isChatRequest,
                         shouldCancel: { [weak self] in
                             self?.isCancellationRequested ?? true
                         },
@@ -148,13 +151,31 @@ final class GGUFBackend: InferenceBackend, @unchecked Sendable {
         setCancelRequested(true)
     }
 
-    private func buildEffectivePrompt(prompt: String, systemPrompt: String?) -> String {
-        [systemPrompt?.trimmedForLookup, prompt.trimmedForLookup]
+    private func buildEffectivePrompt(request: InferenceRequest) -> String {
+        if request.isChatRequest {
+            return ConversationPrompting.promptForAssistant(
+                systemPrompt: request.systemPrompt,
+                turns: request.conversationTurns
+            )
+        }
+
+        return [request.systemPrompt?.trimmedForLookup, request.prompt.trimmedForLookup]
             .compactMap { value in
                 guard let value, !value.isEmpty else { return nil }
                 return value
             }
             .joined(separator: "\n\n")
+    }
+
+    private func effectiveParameters(for request: InferenceRequest) -> SamplingParameters {
+        guard request.isChatRequest else { return request.parameters }
+
+        var parameters = request.parameters
+        parameters.stopSequences = ConversationPrompting.mergedStopSequences(
+            parameters.stopSequences,
+            includeDefaultChatStops: true
+        )
+        return parameters
     }
 
     private func cancelAutoOffload() {
@@ -294,6 +315,7 @@ private final class BackendEngine {
     func generate(
         prompt: String,
         parameters: SamplingParameters,
+        treatOutputAsChat: Bool,
         shouldCancel: () -> Bool,
         onToken: (String) -> Void
     ) throws -> InferenceResult {
@@ -340,7 +362,11 @@ private final class BackendEngine {
             if !piece.isEmpty {
                 rawGeneratedText += piece
 
-                let stopHandling = applyStopSequences(to: rawGeneratedText, stopSequences: parameters.stopSequences)
+                let stopHandling = applyStopSequences(
+                    to: rawGeneratedText,
+                    stopSequences: parameters.stopSequences,
+                    treatOutputAsChat: treatOutputAsChat
+                )
                 let nextVisibleText = stopHandling.visibleText
 
                 if nextVisibleText.count > streamedText.count {
@@ -369,7 +395,15 @@ private final class BackendEngine {
 
         llama_synchronize(context)
         let elapsed = max(CFAbsoluteTimeGetCurrent() - startedAt, 0.001)
-        let finalText = stoppedByStopSequence ? streamedText : rawGeneratedText
+        let finalText: String
+        if treatOutputAsChat {
+            finalText = ConversationPrompting.finalizedAssistantText(
+                from: stoppedByStopSequence ? streamedText : rawGeneratedText,
+                stopSequences: parameters.stopSequences
+            )
+        } else {
+            finalText = stoppedByStopSequence ? streamedText : rawGeneratedText
+        }
 
         return InferenceResult(
             text: finalText,
@@ -530,7 +564,18 @@ private final class BackendEngine {
         return Array(UnsafeBufferPointer(start: buffer, count: Int(count)))
     }
 
-    private func applyStopSequences(to text: String, stopSequences: [String]) -> (visibleText: String, shouldStop: Bool) {
+    private func applyStopSequences(
+        to text: String,
+        stopSequences: [String],
+        treatOutputAsChat: Bool
+    ) -> (visibleText: String, shouldStop: Bool) {
+        if treatOutputAsChat {
+            return ConversationPrompting.visibleAssistantText(
+                from: text,
+                stopSequences: stopSequences
+            )
+        }
+
         let cleanedStopSequences = stopSequences.filter { !$0.isEmpty }
         guard !cleanedStopSequences.isEmpty else {
             return (text, false)
@@ -610,11 +655,13 @@ private final class BackendEngine {
     func generate(
         prompt: String,
         parameters: SamplingParameters,
+        treatOutputAsChat: Bool,
         shouldCancel: () -> Bool,
         onToken: (String) -> Void
     ) throws -> InferenceResult {
         let _ = prompt
         let _ = parameters
+        let _ = treatOutputAsChat
         let _ = shouldCancel
         let _ = onToken
         throw InferenceError.failedToInitializeBackend
