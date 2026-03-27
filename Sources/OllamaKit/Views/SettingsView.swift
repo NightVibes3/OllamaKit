@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 
 struct SettingsView: View {
     @ObservedObject private var settings = AppSettings.shared
@@ -543,6 +544,8 @@ struct DataManagementSection: View {
 
     @State private var showingClearChatsConfirmation = false
     @State private var showingClearModelsConfirmation = false
+
+    init() {}
     
     var body: some View {
         VStack(spacing: 0) {

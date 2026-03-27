@@ -197,7 +197,7 @@ final class ServerManager {
         switch endpoint {
         case .hostPort(let host, _):
             return isLoopback(host)
-        case .service(name: _, type: _, domain: _, interface: _), .unix(path: _):
+        case .service(name: _, type: _, domain: _, interface: _), .unix(path: _), .url(_), .opaque(_):
             return false
         @unknown default:
             return false
@@ -344,7 +344,7 @@ final class ServerManager {
             let body: [String: Any] = [
                 "models": models.map { snapshot in
                     let identifier = legacyModelName(for: snapshot)
-                    [
+                    return [
                         "name": identifier,
                         "model": identifier,
                         "size": snapshot.size,
@@ -801,10 +801,10 @@ final class ServerManager {
         sendStreamHeaders(contentType: "application/x-ndjson", on: connection)
 
         do {
-            let result = try await ModelRunner.shared.generate(prompt: prompt, systemPrompt: systemPrompt, parameters: parameters) { token in
+            let result = try await ModelRunner.shared.generate(prompt: prompt, systemPrompt: systemPrompt, parameters: parameters) { [self] token in
                 let chunk: [String: Any] = [
                     "model": model,
-                    "created_at": iso8601String(from: Date()),
+                    "created_at": self.iso8601String(from: Date()),
                     "response": token,
                     "done": false
                 ]
@@ -875,10 +875,10 @@ final class ServerManager {
         sendStreamHeaders(contentType: "application/x-ndjson", on: connection)
 
         do {
-            let result = try await ModelRunner.shared.generate(prompt: prompt, systemPrompt: systemPrompt, parameters: parameters) { token in
+            let result = try await ModelRunner.shared.generate(prompt: prompt, systemPrompt: systemPrompt, parameters: parameters) { [self] token in
                 let chunk: [String: Any] = [
                     "model": model,
-                    "created_at": iso8601String(from: Date()),
+                    "created_at": self.iso8601String(from: Date()),
                     "message": [
                         "role": "assistant",
                         "content": token

@@ -54,7 +54,7 @@ final class ModelRunner: ObservableObject {
             mlockEnabled: AppSettings.shared.mlockEnabled
         )
 
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             queue.async {
                 do {
                     if let backend = self.backend, backend.matches(configuration) {
@@ -128,7 +128,7 @@ final class ModelRunner: ObservableObject {
 
         let effectivePrompt = buildEffectivePrompt(prompt: prompt, systemPrompt: systemPrompt)
 
-        let result = try await withCheckedThrowingContinuation { continuation in
+        let result: GenerationResult = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<GenerationResult, Error>) in
             queue.async {
                 guard let backend = self.backend else {
                     continuation.resume(throwing: ModelError.noModelLoaded)
@@ -381,7 +381,7 @@ private final class BackendEngine {
         let boundedPromptTokens = truncatePromptTokensIfNeeded(promptTokens)
         try decodePromptTokens(boundedPromptTokens)
 
-        let sampler = makeSampler(parameters: parameters)
+        let sampler = try makeSampler(parameters: parameters)
         defer { llama_sampler_free(sampler) }
 
         var generatedText = ""
@@ -506,9 +506,11 @@ private final class BackendEngine {
         return remainingContext
     }
 
-    private func makeSampler(parameters: ModelParameters) -> UnsafeMutablePointer<llama_sampler> {
+    private func makeSampler(parameters: ModelParameters) throws -> UnsafeMutablePointer<llama_sampler> {
         let samplerParams = llama_sampler_chain_default_params()
-        let sampler = llama_sampler_chain_init(samplerParams)
+        guard let sampler = llama_sampler_chain_init(samplerParams) else {
+            throw ModelError.failedToInitializeBackend
+        }
 
         llama_sampler_chain_add(
             sampler,

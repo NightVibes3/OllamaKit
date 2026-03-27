@@ -260,6 +260,14 @@ struct MessageBubble: View {
     var isUser: Bool {
         message.role == .user
     }
+
+    private var bubbleFillStyle: AnyShapeStyle {
+        if isUser {
+            return AnyShapeStyle(Color.accentColor)
+        }
+
+        return AnyShapeStyle(.ultraThinMaterial)
+    }
     
     var body: some View {
         HStack {
@@ -290,7 +298,7 @@ struct MessageBubble: View {
                         .padding(.vertical, 12)
                         .background(
                             RoundedRectangle(cornerRadius: 18)
-                                .fill(isUser ? Color.accentColor : .ultraThinMaterial)
+                                .fill(bubbleFillStyle)
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 18)
                                         .stroke(.white.opacity(0.1), lineWidth: 0.5)
@@ -304,7 +312,7 @@ struct MessageBubble: View {
                         .padding(.vertical, 12)
                         .background(
                             RoundedRectangle(cornerRadius: 18)
-                                .fill(isUser ? Color.accentColor : .ultraThinMaterial)
+                                .fill(bubbleFillStyle)
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 18)
                                         .stroke(.white.opacity(0.1), lineWidth: 0.5)

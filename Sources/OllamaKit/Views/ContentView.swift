@@ -160,54 +160,33 @@ struct GlassCard<Content: View>: View {
 struct AnimatedMeshBackground: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var phase: Double = 0
+
+    private let colors: [Color] = [
+        .purple.opacity(0.3),
+        .blue.opacity(0.2),
+        .cyan.opacity(0.3),
+        .purple.opacity(0.2),
+        .blue.opacity(0.2),
+        .indigo.opacity(0.15),
+        .blue.opacity(0.2),
+        .cyan.opacity(0.15),
+        .indigo.opacity(0.3),
+        .purple.opacity(0.2),
+        .blue.opacity(0.25),
+        .indigo.opacity(0.2),
+        .purple.opacity(0.2),
+        .blue.opacity(0.15),
+        .cyan.opacity(0.2),
+        .purple.opacity(0.15)
+    ]
     
     var body: some View {
         TimelineView(.animation(minimumInterval: reduceMotion ? 0.25 : 0.1)) { _ in
             MeshGradient(
                 width: 4,
                 height: 4,
-                points: [
-                    .init(x: sin(phase) * 0.1, y: cos(phase * 0.7) * 0.1),
-                    .init(x: 0.3 + sin(phase * 0.8) * 0.1, y: 0.2 + cos(phase) * 0.1),
-                    .init(x: 0.7 + sin(phase * 0.6) * 0.1, y: 0.1 + cos(phase * 0.9) * 0.1),
-                    .init(x: 1 + sin(phase * 0.5) * 0.1, y: cos(phase * 0.8) * 0.1),
-                    
-                    .init(x: 0.1 + sin(phase * 0.7) * 0.1, y: 0.4 + cos(phase * 0.6) * 0.1),
-                    .init(x: 0.4 + sin(phase) * 0.1, y: 0.5 + cos(phase * 0.7) * 0.1),
-                    .init(x: 0.6 + sin(phase * 0.8) * 0.1, y: 0.4 + cos(phase * 0.5) * 0.1),
-                    .init(x: 0.9 + sin(phase * 0.6) * 0.1, y: 0.5 + cos(phase) * 0.1),
-                    
-                    .init(x: sin(phase * 0.5) * 0.1, y: 0.8 + cos(phase * 0.8) * 0.1),
-                    .init(x: 0.3 + sin(phase * 0.9) * 0.1, y: 0.7 + cos(phase * 0.6) * 0.1),
-                    .init(x: 0.7 + sin(phase * 0.7) * 0.1, y: 0.8 + cos(phase * 0.9) * 0.1),
-                    .init(x: 1 + sin(phase * 0.8) * 0.1, y: 0.7 + cos(phase * 0.5) * 0.1),
-                    
-                    .init(x: 0.2 + sin(phase) * 0.1, y: 1 + cos(phase * 0.7) * 0.1),
-                    .init(x: 0.5 + sin(phase * 0.6) * 0.1, y: 1 + cos(phase * 0.8) * 0.1),
-                    .init(x: 0.8 + sin(phase * 0.8) * 0.1, y: 1 + cos(phase * 0.6) * 0.1),
-                    .init(x: 1 + sin(phase * 0.5) * 0.1, y: 1 + cos(phase) * 0.1)
-                ],
-                colors: [
-                    .purple.opacity(0.3),
-                    .blue.opacity(0.2),
-                    .cyan.opacity(0.3),
-                    .purple.opacity(0.2),
-                    
-                    .blue.opacity(0.2),
-                    .indigo.opacity(0.15),
-                    .blue.opacity(0.2),
-                    .cyan.opacity(0.15),
-                    
-                    .indigo.opacity(0.3),
-                    .purple.opacity(0.2),
-                    .blue.opacity(0.25),
-                    .indigo.opacity(0.2),
-                    
-                    .purple.opacity(0.2),
-                    .blue.opacity(0.15),
-                    .cyan.opacity(0.2),
-                    .purple.opacity(0.15)
-                ]
+                points: animatedPoints(for: phase),
+                colors: colors
             )
         }
         .onAppear {
@@ -221,6 +200,27 @@ struct AnimatedMeshBackground: View {
             }
         }
         .ignoresSafeArea()
+    }
+
+    private func animatedPoints(for phase: Double) -> [SIMD2<Float>] {
+        [
+            SIMD2(Float(sin(phase) * 0.1), Float(cos(phase * 0.7) * 0.1)),
+            SIMD2(Float(0.3 + sin(phase * 0.8) * 0.1), Float(0.2 + cos(phase) * 0.1)),
+            SIMD2(Float(0.7 + sin(phase * 0.6) * 0.1), Float(0.1 + cos(phase * 0.9) * 0.1)),
+            SIMD2(Float(1 + sin(phase * 0.5) * 0.1), Float(cos(phase * 0.8) * 0.1)),
+            SIMD2(Float(0.1 + sin(phase * 0.7) * 0.1), Float(0.4 + cos(phase * 0.6) * 0.1)),
+            SIMD2(Float(0.4 + sin(phase) * 0.1), Float(0.5 + cos(phase * 0.7) * 0.1)),
+            SIMD2(Float(0.6 + sin(phase * 0.8) * 0.1), Float(0.4 + cos(phase * 0.5) * 0.1)),
+            SIMD2(Float(0.9 + sin(phase * 0.6) * 0.1), Float(0.5 + cos(phase) * 0.1)),
+            SIMD2(Float(sin(phase * 0.5) * 0.1), Float(0.8 + cos(phase * 0.8) * 0.1)),
+            SIMD2(Float(0.3 + sin(phase * 0.9) * 0.1), Float(0.7 + cos(phase * 0.6) * 0.1)),
+            SIMD2(Float(0.7 + sin(phase * 0.7) * 0.1), Float(0.8 + cos(phase * 0.9) * 0.1)),
+            SIMD2(Float(1 + sin(phase * 0.8) * 0.1), Float(0.7 + cos(phase * 0.5) * 0.1)),
+            SIMD2(Float(0.2 + sin(phase) * 0.1), Float(1 + cos(phase * 0.7) * 0.1)),
+            SIMD2(Float(0.5 + sin(phase * 0.6) * 0.1), Float(1 + cos(phase * 0.8) * 0.1)),
+            SIMD2(Float(0.8 + sin(phase * 0.8) * 0.1), Float(1 + cos(phase * 0.6) * 0.1)),
+            SIMD2(Float(1 + sin(phase * 0.5) * 0.1), Float(1 + cos(phase) * 0.1))
+        ]
     }
 }
 
