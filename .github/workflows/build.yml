@@ -95,8 +95,8 @@ jobs:
         sudo xcode-select -s "$DEVELOPER_DIR"
         xcodebuild -showsdks
         xcodebuild -sdk iphoneos -version SDKVersion
-        sudo xcodebuild -downloadPlatform iOS
-        xcrun simctl runtime list
+        sudo xcodebuild -downloadPlatform iOS || echo "Skipping platform download refresh; continuing with installed SDKs."
+        xcrun simctl runtime list || echo "Simulator runtime listing unavailable on this runner; continuing."
 
     - name: Build llama.cpp XCFramework
       run: |
