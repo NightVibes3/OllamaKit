@@ -100,7 +100,7 @@ final class GGUFBackend: InferenceBackend, @unchecked Sendable {
         request: InferenceRequest,
         onChunk: @escaping @Sendable (InferenceChunk) -> Void
     ) async throws -> InferenceResult {
-        guard activeCatalogId == entry.catalogId else {
+        if activeCatalogId != entry.catalogId {
             try await load(entry: entry, runtime: request.runtimePreferences)
             guard activeCatalogId == entry.catalogId else {
                 throw InferenceError.noModelLoaded
