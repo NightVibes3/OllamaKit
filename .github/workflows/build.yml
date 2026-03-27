@@ -64,15 +64,25 @@ jobs:
           ARCHS="arm64" \
           | tee build/build.log
 
+        echo "=== Build directory contents ==="
+        ls -la build/
+
         echo "=== Archive contents ==="
-        find build/OllamaKit.xcarchive -type d -maxdepth 3 2>/dev/null || echo "Archive not found"
+        if [ -d "build/OllamaKit.xcarchive" ]; then
+          find build/OllamaKit.xcarchive -type d -maxdepth 4
+        else
+          echo "Archive not found at expected location"
+          find build -type d -name "*.xcarchive" 2>/dev/null
+        fi
 
     - name: Create IPA (Unsigned)
       run: |
+        echo "=== Looking for .app in archive ==="
         APP_PATH=$(find build/OllamaKit.xcarchive -name "*.app" -type d 2>/dev/null | head -1)
 
         if [ -z "$APP_PATH" ]; then
           echo "Error: Could not find .app file in archive"
+          echo "=== Archive structure ==="
           find build/OllamaKit.xcarchive -type f 2>/dev/null | head -50
           exit 1
         fi
@@ -104,6 +114,7 @@ jobs:
           exit 1
         fi
 
+        echo "IPA contents:"
         unzip -l build/OllamaKit-unsigned.ipa | head -30
 
     - name: Upload IPA Artifact
