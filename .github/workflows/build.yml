@@ -1,0 +1,237 @@
+name: Build Unsigned IPA
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build Type'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - debug
+          - release
+
+env:
+  XCODE_VERSION: "16.0"
+  SCHEME: "OllamaKit"
+  CONFIGURATION: ${{ github.event.inputs.build_type == 'debug' && 'Debug' || 'Release' }}
+
+jobs:
+  build:
+    runs-on: macos-15
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        
+    - name: Select Xcode Version
+      run: |
+        sudo xcode-select -s /Applications/Xcode_16.0.app/Contents/Developer
+        xcodebuild -version
+        
+    - name: Cache Dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/Library/Developer/Xcode/DerivedData
+          .build
+        key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
+        restore-keys: |
+          ${{ runner.os }}-spm-
+          
+    - name: Resolve Package Dependencies
+      run: |
+        xcodebuild -resolvePackageDependencies \
+          -project OllamaKit.xcodeproj \
+          -scheme ${{ env.SCHEME }} || true
+          
+    - name: Build Archive
+      run: |
+        # Clean build folder
+        rm -rf build
+        mkdir -p build
+        
+        # Build for generic iOS device
+        xcodebuild archive \
+          -project OllamaKit.xcodeproj \
+          -scheme ${{ env.SCHEME }} \
+          -configuration ${{ env.CONFIGURATION }} \
+          -sdk iphoneos \
+          -archivePath "build/OllamaKit.xcarchive" \
+          CODE_SIGN_IDENTITY="" \
+          CODE_SIGNING_REQUIRED=NO \
+          CODE_SIGNING_ALLOWED=NO \
+          ENABLE_BITCODE=NO \
+          SWIFT_VERSION=5.9 \
+          IPHONEOS_DEPLOYMENT_TARGET=17.0 \
+          ONLY_ACTIVE_ARCH=NO \
+          ARCHS="arm64" \
+          | tee build/build.log | xcpretty || true
+        
+        # Debug: Show what was created
+        echo "=== Build directory contents ==="
+        ls -la build/
+        
+        echo "=== Archive contents ==="
+        find build/OllamaKit.xcarchive -type d -maxdepth 3 2>/dev/null || echo "Archive not found"
+        
+        echo "=== Looking for .app ==="
+        find build -name "*.app" -type d 2>/dev/null || echo "No .app found"
+          
+    - name: Create IPA (Unsigned)
+      run: |
+        # Find the .app file
+        APP_PATH=$(find build -name "*.app" -type d | head -1)
+        
+        if [ -z "$APP_PATH" ]; then
+          echo "Error: Could not find .app file"
+          echo "Searching in DerivedData..."
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "OllamaKit.app" -type d | head -1)
+        fi
+        
+        if [ -z "$APP_PATH" ]; then
+          echo "Error: Could not find .app file anywhere"
+          exit 1
+        fi
+        
+        echo "Found app at: $APP_PATH"
+        
+        # Create Payload directory
+        mkdir -p build/Payload
+        
+        # Copy app to Payload
+        cp -R "$APP_PATH" build/Payload/OllamaKit.app
+        
+        # Remove signature if any
+        rm -rf build/Payload/OllamaKit.app/_CodeSignature
+        rm -rf build/Payload/OllamaKit.app/CodeResources
+        
+        # Create IPA
+        cd build
+        zip -r "OllamaKit-unsigned.ipa" Payload
+        cd ..
+        
+        # Verify IPA
+        echo "=== IPA Info ==="
+        ls -la build/OllamaKit-unsigned.ipa
+        unzip -l build/OllamaKit-unsigned.ipa | head -20
+        
+    - name: Upload IPA Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: OllamaKit-unsigned-${{ env.CONFIGURATION }}
+        path: build/OllamaKit-unsigned.ipa
+        retention-days: 30
+        
+    - name: Upload to Release
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: softprops/action-gh-release@v1
+      with:
+        files: build/OllamaKit-unsigned.ipa
+        tag_name: v${{ github.run_number }}
+        name: OllamaKit Build ${{ github.run_number }}
+        body: |
+          ## OllamaKit Unsigned IPA
+          
+          This is an unsigned IPA built from commit ${{ github.sha }}.
+          
+          ### Installation
+          
+          To install this IPA on your device, you need to sign it with your Apple ID:
+          
+          #### Option 1: Using AltStore
+          1. Download the IPA
+          2. Open AltStore on your device
+          3. Go to My Apps → + button
+          4. Select the downloaded IPA
+          
+          #### Option 2: Using Sideloadly
+          1. Download and install Sideloadly on your computer
+          2. Connect your device
+          3. Drag the IPA to Sideloadly
+          4. Enter your Apple ID
+          5. Click Start
+          
+          #### Option 3: Using TrollStore (if supported)
+          1. Install TrollStore on your device
+          2. Download the IPA
+          3. Share to TrollStore
+          
+          ### Requirements
+          - iOS 17.0 or later
+          - iPhone or iPad with A12 chip or newer
+          
+          ### Configuration
+          - Default API Server Port: 11434
+          - Access the API at `http://127.0.0.1:11434`
+          
+          ### Features
+          - Run local LLMs using GGUF models
+          - Download models from Hugging Face
+          - OpenAI-compatible API server
+          - Background server mode
+          - Chat interface with markdown support
+          
+          ### Build Info
+          - Configuration: ${{ env.CONFIGURATION }}
+          - Xcode Version: ${{ env.XCODE_VERSION }}
+          - Build Date: ${{ github.event.head_commit.timestamp }}
+        draft: false
+        prerelease: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-simulator:
+    runs-on: macos-15
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        
+    - name: Select Xcode Version
+      run: |
+        sudo xcode-select -s /Applications/Xcode_16.0.app/Contents/Developer
+        xcodebuild -version
+        
+    - name: Build for Simulator
+      run: |
+        rm -rf build-simulator
+        mkdir -p build-simulator
+        
+        xcodebuild build \
+          -project OllamaKit.xcodeproj \
+          -scheme ${{ env.SCHEME }} \
+          -configuration Debug \
+          -sdk iphonesimulator \
+          -destination 'platform=iOS Simulator,name=iPhone 16' \
+          CODE_SIGN_IDENTITY="" \
+          CODE_SIGNING_REQUIRED=NO \
+          | tee build-simulator/build.log | xcpretty || true
+        
+        # Find the app
+        APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "OllamaKit.app" -path "*iphonesimulator*" -type d | head -1)
+        
+        if [ -n "$APP_PATH" ]; then
+          cp -R "$APP_PATH" build-simulator/
+          echo "Found and copied simulator app"
+        else
+          echo "Warning: Could not find simulator app"
+          find ~/Library/Developer/Xcode/DerivedData -name "OllamaKit.app" -type d 2>/dev/null || true
+        fi
+        
+    - name: Upload Simulator Build
+      uses: actions/upload-artifact@v4
+      with:
+        name: OllamaKit-simulator
+        path: build-simulator/OllamaKit.app
+        retention-days: 7
+        if-no-files-found: warn

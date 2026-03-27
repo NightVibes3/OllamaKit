@@ -1,0 +1,752 @@
+import SwiftUI
+
+struct SettingsView: View {
+    @StateObject private var settings = AppSettings.shared
+    @State private var showingResetConfirmation = false
+    @State private var showingClearDataConfirmation = false
+    
+    var body: some View {
+        ZStack {
+            AnimatedMeshBackground()
+            
+            List {
+                // Model Settings
+                Section {
+                    ModelSettingsSection(settings: settings)
+                } header: {
+                    Text("Model Parameters")
+                } footer: {
+                    Text("Default parameters for model inference. These can be overridden per chat.")
+                }
+                .listRowBackground(
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(.ultraThinMaterial)
+                )
+                .listRowSeparator(.hidden)
+                
+                // Performance Settings
+                Section {
+                    PerformanceSettingsSection(settings: settings)
+                } header: {
+                    Text("Performance")
+                } footer: {
+                    Text("Adjust based on your device's capabilities. More GPU layers = faster but more memory usage.")
+                }
+                .listRowBackground(
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(.ultraThinMaterial)
+                )
+                .listRowSeparator(.hidden)
+                
+                // Memory Settings
+                Section {
+                    MemorySettingsSection(settings: settings)
+                } header: {
+                    Text("Memory Management")
+                }
+                .listRowBackground(
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(.ultraThinMaterial)
+                )
+                .listRowSeparator(.hidden)
+                
+                // Hugging Face
+                Section {
+                    HuggingFaceSettingsSection(settings: settings)
+                } header: {
+                    Text("Hugging Face")
+                } footer: {
+                    Text("Required for accessing gated models and higher rate limits.")
+                }
+                .listRowBackground(
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(.ultraThinMaterial)
+                )
+                .listRowSeparator(.hidden)
+                
+                // Interface Settings
+                Section {
+                    InterfaceSettingsSection(settings: settings)
+                } header: {
+                    Text("Interface")
+                }
+                .listRowBackground(
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(.ultraThinMaterial)
+                )
+                .listRowSeparator(.hidden)
+                
+                // Data Management
+                Section {
+                    DataManagementSection()
+                } header: {
+                    Text("Data Management")
+                }
+                .listRowBackground(
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(.ultraThinMaterial)
+                )
+                .listRowSeparator(.hidden)
+                
+                // About
+                Section {
+                    AboutSection()
+                }
+                .listRowBackground(
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(.ultraThinMaterial)
+                )
+                .listRowSeparator(.hidden)
+                
+                // Reset
+                Section {
+                    Button(role: .destructive) {
+                        showingResetConfirmation = true
+                    } label: {
+                        HStack {
+                            Spacer()
+                            Text("Reset All Settings")
+                            Spacer()
+                        }
+                    }
+                }
+                .listRowBackground(
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(.ultraThinMaterial)
+                )
+                .listRowSeparator(.hidden)
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+        }
+        .navigationTitle("Settings")
+        .alert("Reset Settings?", isPresented: $showingResetConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Reset", role: .destructive) {
+                settings.resetToDefaults()
+            }
+        } message: {
+            Text("This will reset all settings to their default values. Your downloaded models and chats will not be affected.")
+        }
+    }
+}
+
+struct ModelSettingsSection: View {
+    @ObservedObject var settings: AppSettings
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Temperature
+            ParameterSlider(
+                title: "Temperature",
+                value: $settings.defaultTemperature,
+                range: 0...2,
+                step: 0.1,
+                description: "Randomness of output"
+            )
+            
+            Divider()
+            
+            // Top P
+            ParameterSlider(
+                title: "Top P",
+                value: $settings.defaultTopP,
+                range: 0...1,
+                step: 0.05,
+                description: "Nucleus sampling"
+            )
+            
+            Divider()
+            
+            // Top K
+            ParameterStepper(
+                title: "Top K",
+                value: $settings.defaultTopK,
+                range: 1...100,
+                description: "Top-k sampling"
+            )
+            
+            Divider()
+            
+            // Repeat Penalty
+            ParameterSlider(
+                title: "Repeat Penalty",
+                value: $settings.defaultRepeatPenalty,
+                range: 0.5...2,
+                step: 0.05,
+                description: "Penalize repetition"
+            )
+            
+            Divider()
+            
+            // Context Length
+            ParameterStepper(
+                title: "Context Length",
+                value: $settings.defaultContextLength,
+                range: 512...32768,
+                step: 512,
+                description: "Maximum context tokens"
+            )
+            
+            Divider()
+            
+            // Max Tokens
+            ParameterStepper(
+                title: "Max Tokens",
+                value: Binding(
+                    get: { max(settings.maxTokens, -1) },
+                    set: { settings.maxTokens = $0 }
+                ),
+                range: -1...8192,
+                step: 128,
+                description: "-1 for unlimited"
+            )
+        }
+    }
+}
+
+struct PerformanceSettingsSection: View {
+    @ObservedObject var settings: AppSettings
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Threads
+            ParameterStepper(
+                title: "CPU Threads",
+                value: $settings.threads,
+                range: 1...16,
+                description: "Number of CPU threads"
+            )
+            
+            Divider()
+            
+            // Batch Size
+            ParameterStepper(
+                title: "Batch Size",
+                value: $settings.batchSize,
+                range: 64...2048,
+                step: 64,
+                description: "Processing batch size"
+            )
+            
+            Divider()
+            
+            // GPU Layers
+            ParameterStepper(
+                title: "GPU Layers",
+                value: $settings.gpuLayers,
+                range: 0...100,
+                description: "Layers to offload to GPU"
+            )
+            
+            Divider()
+            
+            // Flash Attention
+            Toggle(isOn: $settings.flashAttentionEnabled) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Flash Attention")
+                        .font(.system(size: 16, weight: .medium))
+                    Text("Faster attention mechanism")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 12)
+        }
+    }
+}
+
+struct MemorySettingsSection: View {
+    @ObservedObject var settings: AppSettings
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // mmap
+            Toggle(isOn: $settings.mmapEnabled) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Memory Mapping")
+                        .font(.system(size: 16, weight: .medium))
+                    Text("Map model files to memory")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 12)
+            
+            Divider()
+            
+            // mlock
+            Toggle(isOn: $settings.mlockEnabled) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Lock Memory")
+                        .font(.system(size: 16, weight: .medium))
+                    Text("Prevent swapping to disk")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 12)
+            
+            Divider()
+            
+            // Keep in memory
+            Toggle(isOn: $settings.keepModelInMemory) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Keep Model Loaded")
+                        .font(.system(size: 16, weight: .medium))
+                    Text("Don't unload after generation")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 12)
+            
+            if !settings.keepModelInMemory {
+                Divider()
+                
+                // Auto-offload time
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Auto-offload Delay")
+                            .font(.system(size: 16, weight: .medium))
+                        Text("Minutes before unloading")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    HStack(spacing: 4) {
+                        Button {
+                            if settings.autoOffloadMinutes > 1 {
+                                settings.autoOffloadMinutes -= 1
+                            }
+                        } label: {
+                            Image(systemName: "minus.circle.fill")
+                                .font(.system(size: 22))
+                                .foregroundStyle(.accent)
+                        }
+                        
+                        Text("\(settings.autoOffloadMinutes)m")
+                            .font(.system(size: 16, weight: .medium, design: .monospaced))
+                            .frame(minWidth: 50)
+                        
+                        Button {
+                            if settings.autoOffloadMinutes < 60 {
+                                settings.autoOffloadMinutes += 1
+                            }
+                        } label: {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.system(size: 22))
+                                .foregroundStyle(.accent)
+                        }
+                    }
+                }
+                .padding(.vertical, 12)
+            }
+        }
+    }
+}
+
+struct HuggingFaceSettingsSection: View {
+    @ObservedObject var settings: AppSettings
+    @State private var showingToken = false
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("API Token")
+                        .font(.system(size: 16, weight: .medium))
+                    Text("For gated models and rate limits")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+                
+                Spacer()
+                
+                HStack(spacing: 8) {
+                    if settings.huggingFaceToken.isEmpty {
+                        Text("Not Set")
+                            .font(.system(size: 14))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text(showingToken ? settings.huggingFaceToken : String(repeating: "•", count: min(settings.huggingFaceToken.count, 20)))
+                            .font(.system(size: 14, design: .monospaced))
+                            .lineLimit(1)
+                    }
+                    
+                    Button {
+                        showingToken.toggle()
+                    } label: {
+                        Image(systemName: showingToken ? "eye.slash" : "eye")
+                            .font(.system(size: 14))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(.ultraThinMaterial)
+                )
+            }
+            .padding(.vertical, 12)
+            
+            Divider()
+            
+            NavigationLink {
+                HuggingFaceTokenEditView(token: $settings.huggingFaceToken)
+            } label: {
+                HStack {
+                    Text(settings.huggingFaceToken.isEmpty ? "Add Token" : "Edit Token")
+                        .font(.system(size: 16, weight: .medium))
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .padding(.vertical, 12)
+        }
+    }
+}
+
+struct HuggingFaceTokenEditView: View {
+    @Binding var token: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var tempToken: String = ""
+    
+    var body: some View {
+        Form {
+            Section {
+                TextField("hf_...", text: $tempToken)
+                    .font(.system(size: 16, design: .monospaced))
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+            } header: {
+                Text("Hugging Face Token")
+            } footer: {
+                Text("Get your token from huggingface.co/settings/tokens")
+            }
+            
+            Section {
+                Link(destination: URL(string: "https://huggingface.co/settings/tokens")!) {
+                    HStack {
+                        Text("Get Token")
+                        Spacer()
+                        Image(systemName: "arrow.up.right.square")
+                            .foregroundStyle(.accent)
+                    }
+                }
+            }
+        }
+        .navigationTitle("API Token")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Cancel") { dismiss() }
+            }
+            
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save") {
+                    token = tempToken
+                    dismiss()
+                }
+            }
+        }
+        .onAppear {
+            tempToken = token
+        }
+    }
+}
+
+struct InterfaceSettingsSection: View {
+    @ObservedObject var settings: AppSettings
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            Toggle(isOn: $settings.darkMode) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Dark Mode")
+                        .font(.system(size: 16, weight: .medium))
+                }
+            }
+            .padding(.vertical, 12)
+            
+            Divider()
+            
+            Toggle(isOn: $settings.hapticFeedback) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Haptic Feedback")
+                        .font(.system(size: 16, weight: .medium))
+                }
+            }
+            .padding(.vertical, 12)
+            
+            Divider()
+            
+            Toggle(isOn: $settings.showTokenCount) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Show Token Count")
+                        .font(.system(size: 16, weight: .medium))
+                }
+            }
+            .padding(.vertical, 12)
+            
+            Divider()
+            
+            Toggle(isOn: $settings.showGenerationSpeed) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Show Generation Speed")
+                        .font(.system(size: 16, weight: .medium))
+                }
+            }
+            .padding(.vertical, 12)
+            
+            Divider()
+            
+            Toggle(isOn: $settings.markdownRendering) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Markdown Rendering")
+                        .font(.system(size: 16, weight: .medium))
+                }
+            }
+            .padding(.vertical, 12)
+            
+            Divider()
+            
+            Toggle(isOn: $settings.streamingEnabled) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Streaming Response")
+                        .font(.system(size: 16, weight: .medium))
+                    Text("Show tokens as they're generated")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 12)
+        }
+    }
+}
+
+struct DataManagementSection: View {
+    @State private var showingClearChatsConfirmation = false
+    @State private var showingClearModelsConfirmation = false
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            Button {
+                showingClearChatsConfirmation = true
+            } label: {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Clear All Chats")
+                            .font(.system(size: 16, weight: .medium))
+                        Text("Delete all chat history")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    Image(systemName: "chevron.right")
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.vertical, 12)
+            
+            Divider()
+            
+            Button {
+                showingClearModelsConfirmation = true
+            } label: {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Delete All Models")
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundStyle(.red)
+                        Text("Remove all downloaded models")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    Image(systemName: "chevron.right")
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.vertical, 12)
+        }
+        .alert("Clear All Chats?", isPresented: $showingClearChatsConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Clear", role: .destructive) {
+                // Clear chats
+            }
+        } message: {
+            Text("This will permanently delete all your chat history. This action cannot be undone.")
+        }
+        .alert("Delete All Models?", isPresented: $showingClearModelsConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete", role: .destructive) {
+                // Delete models
+            }
+        } message: {
+            Text("This will permanently delete all downloaded models. You'll need to re-download them to use them again.")
+        }
+    }
+}
+
+struct AboutSection: View {
+    var body: some View {
+        VStack(spacing: 16) {
+            HStack {
+                Spacer()
+                
+                VStack(spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 24)
+                            .fill(
+                                LinearGradient(
+                                    colors: [.purple.opacity(0.3), .blue.opacity(0.3)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 100, height: 100)
+                        
+                        Image(systemName: "cube.transparent")
+                            .font(.system(size: 50))
+                            .foregroundStyle(.white)
+                    }
+                    
+                    VStack(spacing: 4) {
+                        Text("OllamaKit")
+                            .font(.system(size: 24, weight: .bold))
+                        
+                        Text("Version 1.0.0")
+                            .font(.system(size: 15))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                
+                Spacer()
+            }
+            
+            Text("Run local LLMs on your iOS device with an OpenAI-compatible API server.")
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            
+            HStack(spacing: 20) {
+                Link(destination: URL(string: "https://github.com")!) {
+                    Image(systemName: "logo.github")
+                        .font(.system(size: 24))
+                }
+                
+                Link(destination: URL(string: "https://huggingface.co")!) {
+                    Image(systemName: "globe")
+                        .font(.system(size: 24))
+                }
+            }
+            .foregroundStyle(.accent)
+        }
+        .padding(20)
+    }
+}
+
+// MARK: - Reusable Components
+
+struct ParameterSlider: View {
+    let title: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let step: Double
+    let description: String
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 16, weight: .medium))
+                    Text(description)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+                
+                Spacer()
+                
+                Text(String(format: "%.2f", value))
+                    .font(.system(size: 16, weight: .medium, design: .monospaced))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(.ultraThinMaterial)
+                    )
+            }
+            
+            Slider(value: $value, in: range, step: step)
+                .tint(.accent)
+        }
+        .padding(.vertical, 12)
+    }
+}
+
+struct ParameterStepper: View {
+    let title: String
+    @Binding var value: Int
+    let range: ClosedRange<Int>
+    var step: Int = 1
+    let description: String
+    
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 16, weight: .medium))
+                Text(description)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            }
+            
+            Spacer()
+            
+            HStack(spacing: 12) {
+                Button {
+                    if value - step >= range.lowerBound {
+                        value -= step
+                    }
+                } label: {
+                    Image(systemName: "minus.circle.fill")
+                        .font(.system(size: 24))
+                        .foregroundStyle(.accent)
+                }
+                .disabled(value <= range.lowerBound)
+                
+                Text("\(value)")
+                    .font(.system(size: 16, weight: .medium, design: .monospaced))
+                    .frame(minWidth: 60)
+                
+                Button {
+                    if value + step <= range.upperBound {
+                        value += step
+                    }
+                } label: {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 24))
+                        .foregroundStyle(.accent)
+                }
+                .disabled(value >= range.upperBound)
+            }
+        }
+        .padding(.vertical, 12)
+    }
+}
+
+#Preview {
+    SettingsView()
+}
