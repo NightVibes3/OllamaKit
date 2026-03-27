@@ -417,13 +417,6 @@ enum HapticManager {
     }
 }
 
-extension String {
-    var nonEmpty: String? {
-        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-}
-
 enum ModelPathHelper {
     static var modelsDirectoryURL: URL {
         ModelRegistryPath.modelsDirectoryURL
