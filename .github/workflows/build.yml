@@ -21,6 +21,7 @@ env:
   IOS_DEPLOYMENT_TARGET: "26.0"
   LLAMA_CPP_TAG: "b8548"
   CONFIGURATION: ${{ github.event.inputs.build_type == 'debug' && 'Debug' || 'Release' }}
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 permissions:
   contents: write
@@ -44,19 +45,68 @@ jobs:
     - name: Select Xcode Version
       run: |
         set -eo pipefail
-        XCODE_APP=$(ls -d /Applications/Xcode_${XCODE_MAJOR}*.app 2>/dev/null | sort -V | tail -n 1)
-        if [ -z "$XCODE_APP" ] && [ -d /Applications/Xcode.app ]; then
-          XCODE_APP=/Applications/Xcode.app
+        shopt -s nullglob
+
+        candidates=(/Applications/Xcode_${XCODE_MAJOR}*.app)
+        if [ -d /Applications/Xcode.app ]; then
+          candidates+=(/Applications/Xcode.app)
         fi
-        if [ -z "$XCODE_APP" ]; then
+
+        if [ "${#candidates[@]}" -eq 0 ]; then
           echo "No Xcode ${XCODE_MAJOR}.x installation found on this runner."
           ls -1 /Applications | grep Xcode || true
           exit 1
         fi
-        echo "Using $XCODE_APP"
-        echo "DEVELOPER_DIR=$XCODE_APP/Contents/Developer" >> "$GITHUB_ENV"
-        "$XCODE_APP/Contents/Developer/usr/bin/xcodebuild" -version
-        "$XCODE_APP/Contents/Developer/usr/bin/xcodebuild" -showsdks
+
+        IFS=$'\n' sorted_candidates=($(printf '%s\n' "${candidates[@]}" | sort -rV))
+        unset IFS
+        selected_xcode=""
+
+        for xcode_app in "${sorted_candidates[@]}"; do
+          developer_dir="$xcode_app/Contents/Developer"
+          xcodebuild_bin="$developer_dir/usr/bin/xcodebuild"
+
+          echo "=== Inspecting $xcode_app ==="
+          "$xcodebuild_bin" -version
+          "$xcodebuild_bin" -showsdks
+
+          destinations="$(
+            DEVELOPER_DIR="$developer_dir" \
+            "$xcodebuild_bin" -project OllamaKit.xcodeproj -scheme OllamaKit -showdestinations 2>&1 || true
+          )"
+          echo "$destinations"
+
+          if printf '%s' "$destinations" | grep -q "Any iOS Device" && ! printf '%s' "$destinations" | grep -q "error:iOS"; then
+            selected_xcode="$xcode_app"
+            break
+          fi
+
+          if printf '%s' "$destinations" | grep -q "error:iOS .* is not installed"; then
+            echo "Attempting to install the iOS platform for $xcode_app"
+            DEVELOPER_DIR="$developer_dir" "$xcodebuild_bin" -downloadPlatform iOS
+
+            destinations="$(
+              DEVELOPER_DIR="$developer_dir" \
+              "$xcodebuild_bin" -project OllamaKit.xcodeproj -scheme OllamaKit -showdestinations 2>&1 || true
+            )"
+            echo "$destinations"
+
+            if printf '%s' "$destinations" | grep -q "Any iOS Device" && ! printf '%s' "$destinations" | grep -q "error:iOS"; then
+              selected_xcode="$xcode_app"
+              break
+            fi
+          fi
+        done
+
+        if [ -z "$selected_xcode" ]; then
+          echo "Failed to find an Xcode ${XCODE_MAJOR}.x installation with a usable iOS platform."
+          exit 1
+        fi
+
+        echo "Using $selected_xcode"
+        echo "DEVELOPER_DIR=$selected_xcode/Contents/Developer" >> "$GITHUB_ENV"
+        "$selected_xcode/Contents/Developer/usr/bin/xcodebuild" -version
+        "$selected_xcode/Contents/Developer/usr/bin/xcodebuild" -showsdks
 
     - name: Build llama.cpp XCFramework
       run: |
