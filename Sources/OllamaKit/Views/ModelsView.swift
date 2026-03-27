@@ -1,28 +1,30 @@
+import OllamaCore
 import SwiftUI
-import SwiftData
 import UIKit
 import UniformTypeIdentifiers
 
 struct ModelsView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Query(sort: \DownloadedModel.downloadDate, order: .reverse) private var downloadedModels: [DownloadedModel]
-    
     @ObservedObject private var modelRunner = ModelRunner.shared
+    @StateObject private var modelStore = ModelStorage.shared
     @StateObject private var viewModel = ModelsViewModel()
     @State private var showingSearch = false
     @State private var showingImporter = false
 
-    private var activeModel: DownloadedModel? {
-        guard let loadedModelPath = modelRunner.activeLoadedModelPath else { return nil }
-        return downloadedModels.first { $0.localPath == loadedModelPath }
+    private var installedModels: [ModelSnapshot] {
+        modelStore.installedSnapshots
+    }
+
+    private var activeModel: ModelSnapshot? {
+        guard let activeCatalogId = modelRunner.activeCatalogId else { return nil }
+        return modelStore.selectionSnapshots.first { $0.catalogId == activeCatalogId }
     }
 
     private var supportedImportTypes: [UTType] {
         if let ggufType = UTType(filenameExtension: "gguf") {
-            return [ggufType, .data]
+            return [ggufType, .folder, .data]
         }
 
-        return [.data]
+        return [.folder, .data]
     }
     
     var body: some View {
@@ -40,19 +42,19 @@ struct ModelsView: View {
                     BuiltInAppleModelCard()
 
                     SurfaceSectionCard(
-                        title: "Downloaded Models",
-                        footer: downloadedModels.isEmpty
-                            ? "Download GGUF models from Hugging Face or import a local GGUF file to get started."
-                            : "\(downloadedModels.count) model\(downloadedModels.count == 1 ? "" : "s") available on this device."
+                        title: "Installed Models",
+                        footer: installedModels.isEmpty
+                            ? "Download GGUF models or import a local GGUF/CoreML package to get started."
+                            : "\(installedModels.count) model\(installedModels.count == 1 ? "" : "s") available on this device."
                     ) {
-                        if downloadedModels.isEmpty {
+                        if installedModels.isEmpty {
                             EmptyModelsView()
                         } else {
                             VStack(spacing: 0) {
-                                ForEach(Array(downloadedModels.enumerated()), id: \.element.id) { index, model in
+                                ForEach(Array(installedModels.enumerated()), id: \.element.id) { index, model in
                                     DownloadedModelRow(model: model, viewModel: viewModel)
 
-                                    if index < downloadedModels.count - 1 {
+                                    if index < installedModels.count - 1 {
                                         Divider()
                                     }
                                 }
@@ -101,37 +103,72 @@ struct ModelsView: View {
                 dismissButton: .default(Text("OK"))
             )
         }
+        .task {
+            await modelStore.refresh()
+        }
     }
-    
-    private func deleteModels(at offsets: IndexSet) {
-        let modelsToDelete = offsets.compactMap { index in
-            downloadedModels.indices.contains(index) ? downloadedModels[index] : nil
-        }
+}
 
-        for model in modelsToDelete {
-            
-            // Delete file
-            try? FileManager.default.removeItem(atPath: model.localPath)
-
-            if ModelRunner.shared.loadedModelPath == model.localPath {
-                ModelRunner.shared.unloadModel()
-            }
-            if model.matchesStoredReference(AppSettings.shared.defaultModelId) {
-                AppSettings.shared.defaultModelId = ""
-            }
-            
-            // Delete from database
-            modelContext.delete(model)
+private extension ModelSnapshot {
+    var importSourceLabel: String {
+        switch importSource {
+        case .builtIn:
+            return "Built In"
+        case .huggingFaceDownload:
+            return "Downloaded"
+        case .localImport:
+            return "Local"
+        case .coreMLImport:
+            return "CoreML"
+        case .migratedLegacy:
+            return "Migrated"
         }
-        try? modelContext.save()
-        Task { @MainActor in
-            HapticManager.notification(.warning)
+    }
+
+    var importSourceIcon: String {
+        switch importSource {
+        case .builtIn:
+            return "apple.logo"
+        case .huggingFaceDownload:
+            return "arrow.down.circle"
+        case .localImport:
+            return "square.and.arrow.down"
+        case .coreMLImport:
+            return "shippingbox"
+        case .migratedLegacy:
+            return "clock.arrow.trianglehead.counterclockwise.rotate.90"
+        }
+    }
+
+    var backendDisplayName: String {
+        switch backendKind {
+        case .ggufLlama:
+            return "GGUF / llama.cpp"
+        case .coreMLPackage:
+            return "CoreML Package"
+        case .appleFoundation:
+            return "Apple Foundation"
+        }
+    }
+}
+
+private extension ModelCompatibilityLevel {
+    var tint: Color {
+        switch self {
+        case .recommended:
+            return .green
+        case .supported:
+            return .orange
+        case .unavailable:
+            return .red
+        case .unknown:
+            return .secondary
         }
     }
 }
 
 struct ActiveModelSummary: View {
-    let model: DownloadedModel
+    let model: ModelSnapshot
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -198,10 +235,9 @@ struct ModelFactChip: View {
 }
 
 struct DownloadedModelRow: View {
-    @Environment(\.modelContext) private var modelContext
     @ObservedObject private var modelRunner = ModelRunner.shared
     @ObservedObject private var settings = AppSettings.shared
-    let model: DownloadedModel
+    let model: ModelSnapshot
     @ObservedObject var viewModel: ModelsViewModel
     @State private var showingOptions = false
     
@@ -223,41 +259,35 @@ struct DownloadedModelRow: View {
                     .font(.system(size: 17, weight: .semibold))
                 
                 HStack(spacing: 12) {
-                    if model.modelId.hasPrefix("local/") {
-                        Label("Local", systemImage: "square.and.arrow.down")
+                    Label(model.importSourceLabel, systemImage: model.importSourceIcon)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+
+                    Label(model.quantization, systemImage: model.backendKind == .coreMLPackage ? "shippingbox" : "cpu")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+
+                    if model.size > 0 {
+                        Text("•")
+                            .foregroundStyle(.tertiary)
+
+                        Label(model.formattedSize, systemImage: "externaldrive")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                     }
-
-                    Label(model.quantization, systemImage: "cpu")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                    
-                    Text("•")
-                        .foregroundStyle(.tertiary)
-                    
-                    Label(model.formattedSize, systemImage: "externaldrive")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
                 }
                 
                 HStack(spacing: 12) {
-                    Label("\(max(settings.defaultContextLength, 512)) ctx", systemImage: "text.alignleft")
+                    Label("\(model.runtimeContextLength) ctx", systemImage: "text.alignleft")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
-                    
-                    if model.isFavorite {
-                        Image(systemName: "star.fill")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.yellow)
-                    }
                 }
             }
             
             Spacer()
             
             // Status indicator
-            if modelRunner.activeLoadedModelPath == model.localPath {
+            if modelRunner.activeCatalogId == model.catalogId {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .font(.system(size: 22))
@@ -275,22 +305,9 @@ struct DownloadedModelRow: View {
         .contextMenu {
             Button {
                 Task {
-                    // Validate path before attempting to load
-                    guard !model.localPath.isEmpty else {
-                        viewModel.errorMessage = "Invalid model path. Please re-download the model."
-                        viewModel.showError = true
-                        return
-                    }
-                    
-                    guard FileManager.default.fileExists(atPath: model.localPath) else {
-                        viewModel.errorMessage = "Model file not found. The app may have been moved or the model needs to be re-downloaded."
-                        viewModel.showError = true
-                        return
-                    }
-                    
                     do {
                         try await ModelRunner.shared.loadModel(
-                            from: model.localPath,
+                            catalogId: model.catalogId,
                             contextLength: model.runtimeContextLength,
                             gpuLayers: AppSettings.shared.gpuLayers
                         )
@@ -308,17 +325,7 @@ struct DownloadedModelRow: View {
             } label: {
                 Label("Load Model", systemImage: "play.circle")
             }
-            
-            Button {
-                model.isFavorite.toggle()
-                try? modelContext.save()
-                Task { @MainActor in
-                    HapticManager.selectionChanged()
-                }
-            } label: {
-                Label(model.isFavorite ? "Unfavorite" : "Favorite", systemImage: model.isFavorite ? "star.slash" : "star")
-            }
-            
+
             Button(role: .destructive) {
                 deleteModel()
             } label: {
@@ -328,22 +335,9 @@ struct DownloadedModelRow: View {
         .confirmationDialog("Model Options", isPresented: $showingOptions, titleVisibility: .visible) {
             Button("Load Model") {
                 Task {
-                    // Validate path before attempting to load
-                    guard !model.localPath.isEmpty else {
-                        viewModel.errorMessage = "Invalid model path. Please re-download the model."
-                        viewModel.showError = true
-                        return
-                    }
-                    
-                    guard FileManager.default.fileExists(atPath: model.localPath) else {
-                        viewModel.errorMessage = "Model file not found. The app may have been moved or the model needs to be re-downloaded."
-                        viewModel.showError = true
-                        return
-                    }
-                    
                     do {
                         try await ModelRunner.shared.loadModel(
-                            from: model.localPath,
+                            catalogId: model.catalogId,
                             contextLength: model.runtimeContextLength,
                             gpuLayers: AppSettings.shared.gpuLayers
                         )
@@ -372,7 +366,7 @@ struct DownloadedModelRow: View {
             
             Button("View Info") {
                 viewModel.alertTitle = "Model Info"
-                viewModel.errorMessage = "Model: \(model.displayName)\nQuantization: \(model.quantization)\nContext: \(model.runtimeContextLength)\nPath: \(model.localPath)"
+                viewModel.errorMessage = "Model: \(model.displayName)\nBackend: \(model.backendDisplayName)\nQuantization: \(model.quantization)\nContext: \(model.runtimeContextLength)\nIdentifier: \(model.catalogId)"
                 viewModel.showError = true
             }
             
@@ -384,19 +378,13 @@ struct DownloadedModelRow: View {
     }
 
     private func deleteModel() {
-        if !model.localPath.isEmpty {
-            try? FileManager.default.removeItem(atPath: model.localPath)
-        }
-        if ModelRunner.shared.loadedModelPath == model.localPath {
-            ModelRunner.shared.unloadModel()
-        }
-        if model.matchesStoredReference(AppSettings.shared.defaultModelId) {
-            AppSettings.shared.defaultModelId = ""
-        }
-        modelContext.delete(model)
-        try? modelContext.save()
-        Task { @MainActor in
-            HapticManager.notification(.warning)
+        Task {
+            let didDelete = await ModelStorage.shared.deleteModel(catalogId: model.catalogId)
+            if didDelete {
+                await MainActor.run {
+                    HapticManager.notification(.warning)
+                }
+            }
         }
     }
 }
@@ -417,7 +405,7 @@ struct EmptyModelsView: View {
             Text("No Models Yet")
                 .font(.system(size: 20, weight: .bold))
             
-            Text("Download GGUF models from Hugging Face to get started")
+            Text("Download GGUF models or import a CoreML package to get started")
                 .font(.system(size: 15))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -430,13 +418,17 @@ struct EmptyModelsView: View {
 
 struct BuiltInAppleModelCard: View {
     @ObservedObject private var settings = AppSettings.shared
+    @StateObject private var modelStore = ModelStorage.shared
+    @State private var compatibility = CompatibilityReport(
+        backendKind: .appleFoundation,
+        level: .unknown,
+        title: "Checking",
+        message: "Checking Apple Intelligence availability on this device."
+    )
 
-    private var model: DownloadedModel {
-        BuiltInModelCatalog.appleOnDeviceModel()
-    }
-
-    private var availability: BuiltInModelAvailability {
-        BuiltInModelCatalog.availability()
+    private var model: ModelSnapshot {
+        modelStore.selectionSnapshots.first(where: \.isBuiltInAppleModel)
+            ?? BuiltInModelCatalog.appleOnDeviceModel()
     }
 
     private var isDefault: Bool {
@@ -446,18 +438,18 @@ struct BuiltInAppleModelCard: View {
     var body: some View {
         SurfaceSectionCard(
             title: "Apple On-Device AI",
-            footer: availability.detail
+            footer: compatibility.message
         ) {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(alignment: .top, spacing: 12) {
                     ZStack {
                         Circle()
-                            .fill(availability.tint.opacity(0.16))
+                            .fill(compatibility.level.tint.opacity(0.16))
                             .frame(width: 46, height: 46)
 
                         Image(systemName: "apple.logo")
                             .font(.system(size: 18, weight: .semibold))
-                            .foregroundStyle(availability.tint)
+                            .foregroundStyle(compatibility.level.tint)
                     }
 
                     VStack(alignment: .leading, spacing: 4) {
@@ -471,15 +463,15 @@ struct BuiltInAppleModelCard: View {
 
                     Spacer()
 
-                    Text(availability.title)
+                    Text(compatibility.title)
                         .font(.system(size: 11, weight: .semibold))
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
                         .background(
                             Capsule()
-                                .fill(availability.tint.opacity(0.18))
+                                .fill(compatibility.level.tint.opacity(0.18))
                         )
-                        .foregroundStyle(availability.tint)
+                        .foregroundStyle(compatibility.level.tint)
                 }
 
                 HStack(spacing: 10) {
@@ -493,7 +485,7 @@ struct BuiltInAppleModelCard: View {
                         AppSettings.shared.defaultModelId = model.persistentReference
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!availability.isAvailable || isDefault)
+                    .disabled(!compatibility.isUsable || isDefault)
 
                     if isDefault {
                         Button("Clear Default") {
@@ -504,6 +496,9 @@ struct BuiltInAppleModelCard: View {
                 }
             }
             .padding(.vertical, 16)
+        }
+        .task {
+            compatibility = await DeviceCapabilityService.shared.appleFoundationAvailability()
         }
     }
 }
@@ -581,10 +576,10 @@ struct ImportLocalModelCard: View {
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Import Local GGUF")
+                    Text("Import Local Model")
                         .font(.system(size: 17, weight: .semibold))
 
-                    Text("Bring an existing model file into the app")
+                    Text("Bring an existing GGUF file or CoreML package into the app")
                         .font(.system(size: 14))
                         .foregroundStyle(.secondary)
                 }
@@ -1023,11 +1018,28 @@ class ModelsViewModel: ObservableObject {
     @Published var errorMessage = ""
 
     func importLocalModel(from sourceURL: URL) async {
+        let startedAccessing = sourceURL.startAccessingSecurityScopedResource()
+        defer {
+            if startedAccessing {
+                sourceURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
         do {
-            let importedModel = try importGGUFModel(from: sourceURL)
-            ModelStorage.shared.upsertDownloadedModel(importedModel)
+            let importedModel: ModelSnapshot
+            let isDirectory = sourceURL.hasDirectoryPath
+            let fileExtension = sourceURL.pathExtension.lowercased()
+
+            if fileExtension == "gguf" {
+                importedModel = try await ModelStorage.shared.importGGUFModel(from: sourceURL)
+            } else if isDirectory || fileExtension == "mlpackage" || fileExtension == "mlmodelc" {
+                importedModel = try await ModelStorage.shared.importCoreMLPackage(from: sourceURL)
+            } else {
+                throw InferenceError.importFailed("Choose a GGUF file or a CoreML package folder.")
+            }
+
             alertTitle = "Model Imported"
-            errorMessage = "\(importedModel.displayName) is ready to load."
+            errorMessage = "\(importedModel.displayName) is ready to use."
             showError = true
             HapticManager.notification(.success)
         } catch {
@@ -1037,103 +1049,11 @@ class ModelsViewModel: ObservableObject {
             HapticManager.notification(.error)
         }
     }
-
-    private func importGGUFModel(from sourceURL: URL) throws -> DownloadedModel {
-        guard sourceURL.pathExtension.lowercased() == "gguf" else {
-            throw LocalModelImportError.invalidFileType
-        }
-
-        let startedAccessing = sourceURL.startAccessingSecurityScopedResource()
-        defer {
-            if startedAccessing {
-                sourceURL.stopAccessingSecurityScopedResource()
-            }
-        }
-
-        guard FileManager.default.fileExists(atPath: sourceURL.path) else {
-            throw LocalModelImportError.fileMissing
-        }
-
-        try ModelPathHelper.ensureModelsDirectoryExists()
-
-        let importsDirectory = ModelPathHelper.modelsDirectoryURL.appendingPathComponent("LocalImports", isDirectory: true)
-        try FileManager.default.createDirectory(at: importsDirectory, withIntermediateDirectories: true)
-
-        let destinationURL = uniqueImportedDestinationURL(for: sourceURL.lastPathComponent, in: importsDirectory)
-        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
-
-        let size = (try FileManager.default.attributesOfItem(atPath: destinationURL.path)[.size] as? NSNumber)?.int64Value ?? 0
-        let filename = destinationURL.deletingPathExtension().lastPathComponent
-
-        return DownloadedModel(
-            name: filename,
-            modelId: "local/\(sanitizedLocalModelIdentifier(for: filename))",
-            localPath: destinationURL.path,
-            size: size,
-            downloadDate: .now,
-            isDownloaded: true,
-            quantization: detectQuantization(from: destinationURL.lastPathComponent) ?? "GGUF",
-            parameters: detectParameterSize(from: destinationURL.lastPathComponent),
-            contextLength: AppSettings.shared.defaultContextLength
-        )
-    }
-
-    private func uniqueImportedDestinationURL(for filename: String, in directory: URL) -> URL {
-        let fileExtension = URL(fileURLWithPath: filename).pathExtension
-        let baseName = URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent
-
-        var candidate = directory.appendingPathComponent(filename)
-        var suffix = 2
-
-        while FileManager.default.fileExists(atPath: candidate.path) {
-            let nextName = "\(baseName)-\(suffix).\(fileExtension)"
-            candidate = directory.appendingPathComponent(nextName)
-            suffix += 1
-        }
-
-        return candidate
-    }
-
-    private func sanitizedLocalModelIdentifier(for name: String) -> String {
-        let lowered = name.lowercased()
-        let sanitized = lowered.replacingOccurrences(of: #"[^a-z0-9._-]+"#, with: "-", options: .regularExpression)
-        return sanitized.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-    }
-
-    private func detectQuantization(from filename: String) -> String? {
-        let patterns = [
-            "Q2_K", "Q3_K_S", "Q3_K_M", "Q3_K_L",
-            "Q4_0", "Q4_K_S", "Q4_K_M",
-            "Q5_0", "Q5_K_S", "Q5_K_M",
-            "Q6_K", "Q8_0", "F16", "FP16", "FP32"
-        ]
-
-        return patterns.first { filename.localizedCaseInsensitiveContains($0) }
-    }
-
-    private func detectParameterSize(from filename: String) -> String {
-        let matches = filename.range(of: #"\d+(\.\d+)?[Bb]"#, options: .regularExpression)
-        return matches.map { String(filename[$0]).uppercased() } ?? "Unknown"
-    }
-}
-
-enum LocalModelImportError: LocalizedError {
-    case invalidFileType
-    case fileMissing
-
-    var errorDescription: String? {
-        switch self {
-        case .invalidFileType:
-            return "Please choose a GGUF model file."
-        case .fileMissing:
-            return "The selected file is no longer available."
-        }
-    }
 }
 
 @MainActor
 class ModelSearchViewModel: ObservableObject {
-    @Published private(set) var deviceProfile = DeviceCapabilityInspector.current()
+    @Published private(set) var deviceProfile = DeviceCapabilityProfile.placeholder
     @Published var results: [HuggingFaceModel] = []
     @Published var isSearching = false
     @Published var selectedModel: HuggingFaceModel?
@@ -1153,6 +1073,13 @@ class ModelSearchViewModel: ObservableObject {
     private var searchRequestID = UUID()
     private var filesRequestID = UUID()
     private var recommendationsRequestID = UUID()
+
+    init() {
+        Task {
+            await refreshDeviceProfile()
+            await loadRecommendationsIfNeeded()
+        }
+    }
     
     func search(query: String) async {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1265,7 +1192,7 @@ class ModelSearchViewModel: ObservableObject {
                 }
             }
 
-            ModelStorage.shared.upsertDownloadedModel(model)
+            await ModelStorage.shared.upsertDownloadedModel(model)
             downloadProgress = 100
             HapticManager.notification(.success)
         } catch {
@@ -1366,6 +1293,12 @@ class ModelSearchViewModel: ObservableObject {
             return 4
         }
     }
+
+    private func refreshDeviceProfile() async {
+        let profile = await DeviceCapabilityService.shared.currentProfile()
+        let appleAvailability = await DeviceCapabilityService.shared.appleFoundationAvailability()
+        deviceProfile = DeviceCapabilityProfile(profile: profile, appleAvailability: appleAvailability)
+    }
 }
 
 struct DeviceCapabilityCard: View {
@@ -1378,7 +1311,7 @@ struct DeviceCapabilityCard: View {
                     Text(profile.deviceLabel)
                         .font(.system(size: 18, weight: .semibold))
 
-                    Text("\(profile.formattedPhysicalMemory) RAM • iOS \(profile.systemVersion)")
+                    Text("\(profile.chipFamily) • \(profile.formattedPhysicalMemory) RAM • iOS \(profile.systemVersion)")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                 }
@@ -1392,6 +1325,10 @@ struct DeviceCapabilityCard: View {
 
             Text("Best results on this device are usually GGUF files up to \(profile.formattedRecommendedBudget). Files up to \(profile.formattedSupportedBudget) may still run, but larger ones are likely to be slow, unload often, or fail to fit.")
                 .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+
+            Text(profile.appleFoundationSummary)
+                .font(.system(size: 13))
                 .foregroundStyle(.secondary)
         }
         .padding(18)
@@ -1578,10 +1515,55 @@ enum ModelFileCompatibility {
 
 struct DeviceCapabilityProfile {
     let machineIdentifier: String
+    let chipFamily: String
     let systemVersion: String
     let physicalMemoryBytes: Int64
     let recommendedModelBudgetBytes: Int64
     let supportedModelBudgetBytes: Int64
+    let appleFoundationTitle: String
+    let appleFoundationMessage: String
+
+    init(profile: DeviceProfile, appleAvailability: CompatibilityReport) {
+        self.machineIdentifier = profile.machineIdentifier
+        self.chipFamily = profile.chipFamily
+        self.systemVersion = profile.systemVersion
+        self.physicalMemoryBytes = profile.physicalMemoryBytes
+        self.recommendedModelBudgetBytes = profile.recommendedGGUFBudgetBytes
+        self.supportedModelBudgetBytes = profile.supportedGGUFBudgetBytes
+        self.appleFoundationTitle = appleAvailability.title
+        self.appleFoundationMessage = appleAvailability.message
+    }
+
+    static let placeholder = DeviceCapabilityProfile(
+        machineIdentifier: "unknown",
+        chipFamily: "Apple Silicon",
+        systemVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+        physicalMemoryBytes: Int64(ProcessInfo.processInfo.physicalMemory),
+        recommendedModelBudgetBytes: 2_000_000_000,
+        supportedModelBudgetBytes: 3_000_000_000,
+        appleFoundationTitle: "Checking",
+        appleFoundationMessage: "Checking Apple Intelligence availability on this device."
+    )
+
+    private init(
+        machineIdentifier: String,
+        chipFamily: String,
+        systemVersion: String,
+        physicalMemoryBytes: Int64,
+        recommendedModelBudgetBytes: Int64,
+        supportedModelBudgetBytes: Int64,
+        appleFoundationTitle: String,
+        appleFoundationMessage: String
+    ) {
+        self.machineIdentifier = machineIdentifier
+        self.chipFamily = chipFamily
+        self.systemVersion = systemVersion
+        self.physicalMemoryBytes = physicalMemoryBytes
+        self.recommendedModelBudgetBytes = recommendedModelBudgetBytes
+        self.supportedModelBudgetBytes = supportedModelBudgetBytes
+        self.appleFoundationTitle = appleFoundationTitle
+        self.appleFoundationMessage = appleFoundationMessage
+    }
 
     var deviceLabel: String {
         UIDevice.current.userInterfaceIdiom == .pad ? "This iPad" : "This iPhone"
@@ -1599,6 +1581,10 @@ struct DeviceCapabilityProfile {
         ByteCountFormatter.string(fromByteCount: supportedModelBudgetBytes, countStyle: .file)
     }
 
+    var appleFoundationSummary: String {
+        "\(appleFoundationTitle): \(appleFoundationMessage)"
+    }
+
     func compatibility(for fileSize: Int64?) -> ModelFileCompatibility {
         guard let fileSize else { return .unknown }
 
@@ -1614,42 +1600,6 @@ struct DeviceCapabilityProfile {
     }
 }
 
-enum DeviceCapabilityInspector {
-    static func current() -> DeviceCapabilityProfile {
-        let physicalMemory = Int64(ProcessInfo.processInfo.physicalMemory)
-        let recommendedBudget = max(
-            min(Int64(Double(physicalMemory) * 0.30), physicalMemory - 3_000_000_000),
-            1_500_000_000
-        )
-        let supportedBudget = max(
-            min(Int64(Double(physicalMemory) * 0.42), physicalMemory - 2_000_000_000),
-            recommendedBudget
-        )
-
-        return DeviceCapabilityProfile(
-            machineIdentifier: machineIdentifier(),
-            systemVersion: UIDevice.current.systemVersion,
-            physicalMemoryBytes: physicalMemory,
-            recommendedModelBudgetBytes: recommendedBudget,
-            supportedModelBudgetBytes: supportedBudget
-        )
-    }
-
-    private static func machineIdentifier() -> String {
-        var systemInfo = utsname()
-        uname(&systemInfo)
-        var machine = systemInfo.machine
-        let capacity = MemoryLayout.size(ofValue: machine)
-
-        return withUnsafePointer(to: &machine) { pointer in
-            pointer.withMemoryRebound(to: CChar.self, capacity: capacity) { charPointer in
-                String(cString: charPointer)
-            }
-        }
-    }
-}
-
 #Preview {
     ModelsView()
-        .modelContainer(for: [DownloadedModel.self], inMemory: true)
 }

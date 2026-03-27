@@ -1,6 +1,5 @@
 import Foundation
 import Network
-import SwiftData
 
 final class ServerManager {
     static let shared = ServerManager()
@@ -340,7 +339,7 @@ final class ServerManager {
 
     private func handleLegacyListModels(on connection: NWConnection) {
         Task {
-            let models = await MainActor.run { ModelStorage.shared.allSnapshots() }
+            let models = await MainActor.run { ModelStorage.shared.allSnapshots().filter(\.isServerExposed) }
             let body: [String: Any] = [
                 "models": models.map { snapshot in
                     let identifier = legacyModelName(for: snapshot)
@@ -363,7 +362,7 @@ final class ServerManager {
 
     private func handleOpenAIListModels(on connection: NWConnection) {
         Task {
-            let models = await MainActor.run { ModelStorage.shared.allSnapshots() }
+            let models = await MainActor.run { ModelStorage.shared.allSnapshots().filter(\.isServerExposed) }
             let createdAt = Int(Date().timeIntervalSince1970)
             let body: [String: Any] = [
                 "object": "list",
@@ -677,9 +676,7 @@ final class ServerManager {
                     modelId: modelId
                 ) { _ in }
 
-                await MainActor.run {
-                    ModelStorage.shared.upsertDownloadedModel(downloadedModel)
-                }
+                await ModelStorage.shared.upsertDownloadedModel(downloadedModel)
 
                 let finalBody: [String: Any] = [
                     "status": "success",
@@ -722,9 +719,7 @@ final class ServerManager {
         }
 
         Task {
-            let didDelete = await MainActor.run {
-                ModelStorage.shared.deleteModel(name: modelName)
-            }
+            let didDelete = await ModelStorage.shared.deleteModel(name: modelName)
 
             if didDelete {
                 sendJSONResponse(status: 200, body: [:], on: connection)
@@ -738,29 +733,16 @@ final class ServerManager {
         Task {
             let models: [[String: Any]]
 
-            if ModelRunner.shared.isLoaded, let path = ModelRunner.shared.loadedModelPath {
-                let snapshots = await MainActor.run { ModelStorage.shared.allSnapshots() }
-                let snapshot = snapshots.first { $0.localPath == path }
-                let fallbackSnapshot = ModelSnapshot(
-                    id: UUID(),
-                    name: URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent,
-                    modelId: URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent,
-                    localPath: path,
-                    size: 0,
-                    downloadDate: .now,
-                    isDownloaded: true,
-                    quantization: "GGUF",
-                    parameters: "Unknown",
-                    contextLength: AppSettings.shared.defaultContextLength
-                )
-                let resolvedSnapshot = snapshot ?? fallbackSnapshot
+            if ModelRunner.shared.isLoaded, let activeCatalogId = ModelRunner.shared.activeCatalogId {
+                let snapshot = await MainActor.run { ModelStorage.shared.snapshot(name: activeCatalogId) }
                 let expiresAt: Any = AppSettings.shared.keepModelInMemory
                     ? NSNull()
                     : iso8601String(from: Date().addingTimeInterval(TimeInterval(AppSettings.shared.autoOffloadMinutes * 60)))
+                let modelIdentifier = snapshot.map { legacyModelName(for: $0) } ?? activeCatalogId
 
                 models = [[
-                    "name": legacyModelName(for: resolvedSnapshot),
-                    "model": legacyModelName(for: resolvedSnapshot),
+                    "name": modelIdentifier,
+                    "model": modelIdentifier,
                     "size": snapshot?.size ?? 0,
                     "size_vram": 0,
                     "expires_at": expiresAt
@@ -778,16 +760,12 @@ final class ServerManager {
             throw NSError(domain: "ServerManager", code: 404, userInfo: [NSLocalizedDescriptionKey: "Model not found"])
         }
 
-        guard !model.localPath.isEmpty else {
-            throw NSError(domain: "ServerManager", code: 404, userInfo: [NSLocalizedDescriptionKey: "Invalid model path"])
-        }
-
         guard model.fileExists else {
-            throw NSError(domain: "ServerManager", code: 404, userInfo: [NSLocalizedDescriptionKey: "Model file not found. Please re-download the model."])
+            throw NSError(domain: "ServerManager", code: 404, userInfo: [NSLocalizedDescriptionKey: "Model payload not found. Re-import or re-download the model."])
         }
 
         try await ModelRunner.shared.loadModel(
-            from: model.localPath,
+            catalogId: model.catalogId,
             contextLength: model.runtimeContextLength,
             gpuLayers: AppSettings.shared.gpuLayers
         )
@@ -1182,7 +1160,7 @@ final class ServerManager {
     }
 
     private func modelParameters(from json: [String: Any], apiStyle: ParameterAPIStyle) -> ModelParameters {
-        var parameters = ModelParameters.default
+        var parameters = ModelParameters.appDefault
 
         let parameterSource: [String: Any]
         switch apiStyle {
@@ -1540,233 +1518,5 @@ final class ServerManager {
         default:
             return "server_error"
         }
-    }
-}
-
-struct ModelSnapshot: Sendable {
-    let id: UUID
-    let name: String
-    let modelId: String
-    let localPath: String
-    let size: Int64
-    let downloadDate: Date
-    let isDownloaded: Bool
-    let quantization: String
-    let parameters: String
-    let contextLength: Int
-
-    var displayName: String {
-        let modelName = modelId.split(separator: "/").last.map(String.init)
-        return !name.isEmpty ? name : (modelName ?? modelId)
-    }
-
-    var fileExists: Bool {
-        !localPath.isEmpty && FileManager.default.fileExists(atPath: localPath)
-    }
-
-    var runtimeContextLength: Int {
-        max(AppSettings.shared.defaultContextLength, 512)
-    }
-
-    var apiIdentifier: String {
-        guard let name = name.nonEmpty else {
-            return modelId
-        }
-
-        return "\(modelId)#\(name)"
-    }
-}
-
-@MainActor
-final class ModelStorage {
-    static let shared = ModelStorage()
-
-    private var container: ModelContainer?
-
-    private init() {}
-
-    func configure(container: ModelContainer) {
-        self.container = container
-    }
-
-    func allSnapshots() -> [ModelSnapshot] {
-        guard let container else { return [] }
-
-        let context = ModelContext(container)
-        let descriptor = FetchDescriptor<DownloadedModel>(
-            sortBy: [SortDescriptor(\DownloadedModel.downloadDate, order: .reverse)]
-        )
-
-        let models = (try? context.fetch(descriptor)) ?? []
-        return models
-            .filter(\.isDownloaded)
-            .map(snapshot(from:))
-    }
-
-    func snapshot(name: String) -> ModelSnapshot? {
-        resolvedSnapshot(for: name, in: allSnapshots())
-    }
-
-    func upsertDownloadedModel(_ model: DownloadedModel) {
-        guard let container else { return }
-
-        let context = ModelContext(container)
-        let descriptor = FetchDescriptor<DownloadedModel>()
-        let existingModels = (try? context.fetch(descriptor)) ?? []
-
-        for existing in existingModels where
-            existing.modelId.caseInsensitiveCompare(model.modelId) == .orderedSame &&
-            existing.name.caseInsensitiveCompare(model.name) == .orderedSame
-        {
-            if ModelRunner.shared.loadedModelPath == existing.localPath {
-                ModelRunner.shared.unloadModel()
-            }
-
-            if !existing.localPath.isEmpty && existing.localPath != model.localPath {
-                try? FileManager.default.removeItem(atPath: existing.localPath)
-            }
-
-            context.delete(existing)
-        }
-
-        context.insert(model)
-        try? context.save()
-    }
-
-    func deleteModel(name: String) -> Bool {
-        guard let container else { return false }
-
-        let context = ModelContext(container)
-        let descriptor = FetchDescriptor<DownloadedModel>()
-        let models = (try? context.fetch(descriptor)) ?? []
-        guard let model = resolvedDownloadedModel(for: name, in: models) else {
-            return false
-        }
-
-        if ModelRunner.shared.loadedModelPath == model.localPath {
-            ModelRunner.shared.unloadModel()
-        }
-
-        if model.matchesStoredReference(AppSettings.shared.defaultModelId) {
-            AppSettings.shared.defaultModelId = ""
-        }
-
-        if !model.localPath.isEmpty {
-            try? FileManager.default.removeItem(atPath: model.localPath)
-        }
-
-        context.delete(model)
-
-        try? context.save()
-        return true
-    }
-
-    private func resolvedSnapshot(for candidate: String, in snapshots: [ModelSnapshot]) -> ModelSnapshot? {
-        let normalizedCandidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedCandidate.isEmpty else { return nil }
-
-        return snapshots
-            .compactMap { snapshot in
-                matchPriority(for: normalizedCandidate, snapshot: snapshot).map { ($0, snapshot) }
-            }
-            .sorted { lhs, rhs in
-                if lhs.0 != rhs.0 {
-                    return lhs.0 < rhs.0
-                }
-
-                if lhs.1.downloadDate != rhs.1.downloadDate {
-                    return lhs.1.downloadDate > rhs.1.downloadDate
-                }
-
-                return lhs.1.id.uuidString < rhs.1.id.uuidString
-            }
-            .first?
-            .1
-    }
-
-    private func resolvedDownloadedModel(for candidate: String, in models: [DownloadedModel]) -> DownloadedModel? {
-        let normalizedCandidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedCandidate.isEmpty else { return nil }
-
-        return models
-            .compactMap { model in
-                matchPriority(for: normalizedCandidate, model: model).map { ($0, model) }
-            }
-            .sorted { lhs, rhs in
-                if lhs.0 != rhs.0 {
-                    return lhs.0 < rhs.0
-                }
-
-                if lhs.1.downloadDate != rhs.1.downloadDate {
-                    return lhs.1.downloadDate > rhs.1.downloadDate
-                }
-
-                return lhs.1.id.uuidString < rhs.1.id.uuidString
-            }
-            .first?
-            .1
-    }
-
-    private func matchPriority(for candidate: String, snapshot: ModelSnapshot) -> Int? {
-        if snapshot.localPath.caseInsensitiveCompare(candidate) == .orderedSame {
-            return 0
-        }
-
-        if snapshot.apiIdentifier.caseInsensitiveCompare(candidate) == .orderedSame {
-            return 1
-        }
-
-        if snapshot.modelId.caseInsensitiveCompare(candidate) == .orderedSame {
-            return 2
-        }
-
-        if snapshot.name.caseInsensitiveCompare(candidate) == .orderedSame {
-            return 3
-        }
-
-        if snapshot.displayName.caseInsensitiveCompare(candidate) == .orderedSame {
-            return 4
-        }
-
-        return nil
-    }
-
-    private func matchPriority(for candidate: String, model: DownloadedModel) -> Int? {
-        if model.localPath.caseInsensitiveCompare(candidate) == .orderedSame {
-            return 0
-        }
-
-        if model.apiIdentifier.caseInsensitiveCompare(candidate) == .orderedSame {
-            return 1
-        }
-
-        if model.modelId.caseInsensitiveCompare(candidate) == .orderedSame {
-            return 2
-        }
-
-        if model.name.caseInsensitiveCompare(candidate) == .orderedSame {
-            return 3
-        }
-
-        if model.displayName.caseInsensitiveCompare(candidate) == .orderedSame {
-            return 4
-        }
-
-        return nil
-    }
-
-    private func snapshot(from model: DownloadedModel) -> ModelSnapshot {
-        ModelSnapshot(
-            id: model.id,
-            name: model.name,
-            modelId: model.modelId,
-            localPath: model.localPath,
-            size: model.size,
-            downloadDate: model.downloadDate,
-            isDownloaded: model.isDownloaded,
-            quantization: model.quantization,
-            parameters: model.parameters,
-            contextLength: model.contextLength
-        )
     }
 }

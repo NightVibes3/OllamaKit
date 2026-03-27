@@ -1,4 +1,5 @@
 import Foundation
+import OllamaCore
 import SwiftData
 import SwiftUI
 import UIKit
@@ -172,32 +173,23 @@ enum BuiltInModelAvailability: Equatable {
 }
 
 enum BuiltInModelCatalog {
-    static let appleOnDeviceModelID = "apple/foundation-model"
-    static let appleOnDeviceModelName = "Apple On-Device"
-    private static let appleOnDeviceUUID = UUID(uuidString: "C2A7E4D7-5160-4CF9-8DE2-8F5B570C9E2A")!
+    static let appleOnDeviceModelID = SystemModelCatalog.appleFoundationCatalogID
+    static let appleOnDeviceModelName = SystemModelCatalog.appleFoundationModelName
 
-    static func appleOnDeviceModel() -> DownloadedModel {
-        DownloadedModel(
-            id: appleOnDeviceUUID,
-            name: appleOnDeviceModelName,
-            modelId: appleOnDeviceModelID,
-            localPath: "",
-            size: 0,
-            downloadDate: .distantPast,
-            isDownloaded: true,
-            isFavorite: false,
-            quantization: "Apple AI",
-            parameters: "Built In",
-            contextLength: max(AppSettings.shared.defaultContextLength, 2048)
+    static func appleOnDeviceModel() -> ModelSnapshot {
+        ModelSnapshot(
+            entry: SystemModelCatalog.appleFoundationEntry(
+                contextLength: AppSettings.shared.defaultContextLength
+            )
         )
     }
 
-    static func selectionModels(downloadedModels: [DownloadedModel]) -> [DownloadedModel] {
-        [appleOnDeviceModel()] + downloadedModels
+    static func selectionModels(downloadedModels: [ModelSnapshot]) -> [ModelSnapshot] {
+        downloadedModels
     }
 
-    static func resolveStoredReference(_ candidate: String, in downloadedModels: [DownloadedModel]) -> DownloadedModel? {
-        DownloadedModel.resolveStoredReference(candidate, in: selectionModels(downloadedModels: downloadedModels))
+    static func resolveStoredReference(_ candidate: String, in downloadedModels: [ModelSnapshot]) -> ModelSnapshot? {
+        ModelSnapshot.resolveStoredReference(candidate, in: selectionModels(downloadedModels: downloadedModels))
     }
 
     static func availability() -> BuiltInModelAvailability {
@@ -346,26 +338,6 @@ struct GGUFInfo: Identifiable, Hashable {
     var displayName: String { filename }
 }
 
-struct ModelParameters {
-    var temperature: Double
-    var topP: Double
-    var topK: Int
-    var repeatPenalty: Double
-    var maxTokens: Int
-    var stopSequences: [String] = []
-
-    static var `default`: ModelParameters {
-        let settings = AppSettings.shared
-        return ModelParameters(
-            temperature: settings.defaultTemperature,
-            topP: settings.defaultTopP,
-            topK: settings.defaultTopK,
-            repeatPenalty: settings.defaultRepeatPenalty,
-            maxTokens: settings.maxTokens
-        )
-    }
-}
-
 struct PromptTurn: Sendable {
     let role: String
     let content: String
@@ -445,84 +417,6 @@ enum HapticManager {
     }
 }
 
-actor AppleFoundationModelService {
-    static let shared = AppleFoundationModelService()
-
-    private var activeTask: Task<GenerationResult, Error>?
-    private var activeRequestID = UUID()
-
-    func generate(prompt: String, systemPrompt: String?) async throws -> GenerationResult {
-        let availability = BuiltInModelCatalog.availability()
-        guard availability.isAvailable else {
-            throw ModelError.appleModelUnavailable(availability.detail)
-        }
-
-#if canImport(FoundationModels)
-        guard #available(iOS 26.0, *) else {
-            throw ModelError.appleModelUnavailable("Apple's on-device model requires iOS 26 or newer.")
-        }
-
-        stopGeneration()
-
-        let requestID = UUID()
-        activeRequestID = requestID
-
-        let normalizedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        let instructions = systemPrompt?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
-
-        let task = Task<GenerationResult, Error> {
-            let startedAt = CFAbsoluteTimeGetCurrent()
-            let session: LanguageModelSession
-            if let instructions {
-                session = LanguageModelSession(instructions: instructions)
-            } else {
-                session = LanguageModelSession()
-            }
-            let response = try await session.respond(to: normalizedPrompt)
-            try Task.checkCancellation()
-
-            let elapsed = max(CFAbsoluteTimeGetCurrent() - startedAt, 0.001)
-            return GenerationResult(
-                text: response.content.trimmingCharacters(in: .whitespacesAndNewlines),
-                tokensGenerated: 0,
-                promptTokens: 0,
-                generationTime: elapsed,
-                tokensPerSecond: 0,
-                wasCancelled: false
-            )
-        }
-
-        activeTask = task
-
-        do {
-            let result = try await task.value
-            if activeRequestID == requestID {
-                activeTask = nil
-            }
-            return result
-        } catch is CancellationError {
-            if activeRequestID == requestID {
-                activeTask = nil
-            }
-            throw ModelError.generationCancelled
-        } catch {
-            if activeRequestID == requestID {
-                activeTask = nil
-            }
-            throw error
-        }
-#else
-        throw ModelError.appleModelUnavailable("This build does not include Apple's on-device model.")
-#endif
-    }
-
-    func stopGeneration() {
-        activeRequestID = UUID()
-        activeTask?.cancel()
-        activeTask = nil
-    }
-}
-
 extension String {
     var nonEmpty: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
@@ -532,15 +426,14 @@ extension String {
 
 enum ModelPathHelper {
     static var modelsDirectoryURL: URL {
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-        return documents.appendingPathComponent("Models", isDirectory: true)
+        ModelRegistryPath.modelsDirectoryURL
     }
 
     static func ensureModelsDirectoryExists() throws {
         try FileManager.default.createDirectory(
             at: modelsDirectoryURL,
-            withIntermediateDirectories: true
+            withIntermediateDirectories: true,
+            attributes: nil
         )
     }
 }

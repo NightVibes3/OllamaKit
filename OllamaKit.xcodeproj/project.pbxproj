@@ -25,7 +25,28 @@
 		000000010000000000000016 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 000000010000000000000112 /* Metal.framework */; };
 		000000010000000000000017 /* llama.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 000000010000000000000110 /* llama.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		000000010000000000000018 /* SurfaceSectionCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000010000000000000113 /* SurfaceSectionCard.swift */; };
+		000000010000000000000019 /* UnifiedModelCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000010000000000000114 /* UnifiedModelCatalog.swift */; };
+		00000001000000000000001A /* CoreTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000010000000000000116 /* CoreTypes.swift */; };
+		00000001000000000000001B /* ModelRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000010000000000000117 /* ModelRegistry.swift */; };
+		00000001000000000000001C /* DeviceCapabilityService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000010000000000000118 /* DeviceCapabilityService.swift */; };
+		00000001000000000000001D /* GGUFBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000010000000000000119 /* GGUFBackend.swift */; };
+		00000001000000000000001E /* RuntimeCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00000001000000000000011A /* RuntimeCoordinator.swift */; };
+		00000001000000000000001F /* OllamaCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 000000010000000000000115 /* OllamaCore.framework */; };
+		000000010000000000000020 /* OllamaCore.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 000000010000000000000115 /* OllamaCore.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		000000010000000000000021 /* llama.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 000000010000000000000110 /* llama.xcframework */; };
+		000000010000000000000022 /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 000000010000000000000111 /* Accelerate.framework */; };
+		000000010000000000000023 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 000000010000000000000112 /* Metal.framework */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		000000010000000000000900 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 000000010000000000000700 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 000000010000000000000610;
+			remoteInfo = OllamaCore;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
 		000000010000000000000211 /* Embed Frameworks */ = {
@@ -34,6 +55,7 @@
 			dstPath = "";
 			dstSubfolderSpec = 10;
 			files = (
+				000000010000000000000020 /* OllamaCore.framework in Embed Frameworks */,
 				000000010000000000000017 /* llama.xcframework in Embed Frameworks */,
 			);
 			name = "Embed Frameworks";
@@ -62,13 +84,31 @@
 		000000010000000000000111 /* Accelerate.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Accelerate.framework; path = System/Library/Frameworks/Accelerate.framework; sourceTree = SDKROOT; };
 		000000010000000000000112 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
 		000000010000000000000113 /* SurfaceSectionCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfaceSectionCard.swift; sourceTree = "<group>"; };
+		000000010000000000000114 /* UnifiedModelCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnifiedModelCatalog.swift; sourceTree = "<group>"; };
+		000000010000000000000115 /* OllamaCore.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = OllamaCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		000000010000000000000116 /* CoreTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreTypes.swift; sourceTree = "<group>"; };
+		000000010000000000000117 /* ModelRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelRegistry.swift; sourceTree = "<group>"; };
+		000000010000000000000118 /* DeviceCapabilityService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceCapabilityService.swift; sourceTree = "<group>"; };
+		000000010000000000000119 /* GGUFBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GGUFBackend.swift; sourceTree = "<group>"; };
+		00000001000000000000011A /* RuntimeCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeCoordinator.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		000000010000000000000201 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				000000010000000000000023 /* Metal.framework in Frameworks */,
+				000000010000000000000022 /* Accelerate.framework in Frameworks */,
+				000000010000000000000021 /* llama.xcframework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		000000010000000000000200 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				00000001000000000000001F /* OllamaCore.framework in Frameworks */,
 				000000010000000000000016 /* Metal.framework in Frameworks */,
 				000000010000000000000015 /* Accelerate.framework in Frameworks */,
 				000000010000000000000014 /* llama.xcframework in Frameworks */,
@@ -82,6 +122,7 @@
 			isa = PBXGroup;
 			children = (
 				000000010000000000000301 /* OllamaKit */,
+				000000010000000000000520 /* OllamaCore */,
 				000000010000000000000510 /* Frameworks */,
 				000000010000000000000302 /* Products */,
 			);
@@ -105,6 +146,7 @@
 			isa = PBXGroup;
 			children = (
 				000000010000000000000100 /* OllamaKit.app */,
+				000000010000000000000115 /* OllamaCore.framework */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -130,6 +172,7 @@
 				000000010000000000000109 /* ModelRunner.swift */,
 				00000001000000000000010A /* HuggingFaceService.swift */,
 				00000001000000000000010B /* BackgroundTaskManager.swift */,
+				000000010000000000000114 /* UnifiedModelCatalog.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -143,6 +186,18 @@
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
+		};
+		000000010000000000000520 /* OllamaCore */ = {
+			isa = PBXGroup;
+			children = (
+				000000010000000000000116 /* CoreTypes.swift */,
+				000000010000000000000117 /* ModelRegistry.swift */,
+				000000010000000000000118 /* DeviceCapabilityService.swift */,
+				000000010000000000000119 /* GGUFBackend.swift */,
+				00000001000000000000011A /* RuntimeCoordinator.swift */,
+			);
+			path = Sources/OllamaCore;
+			sourceTree = SOURCE_ROOT;
 		};
 /* End PBXGroup section */
 
@@ -159,11 +214,28 @@
 			buildRules = (
 			);
 			dependencies = (
+				000000010000000000000901 /* PBXTargetDependency */,
 			);
 			name = OllamaKit;
 			productName = OllamaKit;
 			productReference = 000000010000000000000100 /* OllamaKit.app */;
 			productType = "com.apple.product-type.application";
+		};
+		000000010000000000000610 /* OllamaCore */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 000000010000000000000611 /* Build configuration list for PBXNativeTarget "OllamaCore" */;
+			buildPhases = (
+				000000010000000000000612 /* Sources */,
+				000000010000000000000201 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = OllamaCore;
+			productName = OllamaCore;
+			productReference = 000000010000000000000115 /* OllamaCore.framework */;
+			productType = "com.apple.product-type.framework";
 		};
 /* End PBXNativeTarget section */
 
@@ -176,6 +248,9 @@
 				LastUpgradeCheck = 1500;
 				TargetAttributes = {
 					000000010000000000000600 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+					000000010000000000000610 = {
 						CreatedOnToolsVersion = 15.0;
 					};
 				};
@@ -194,6 +269,7 @@
 			projectRoot = "";
 			targets = (
 				000000010000000000000600 /* OllamaKit */,
+				000000010000000000000610 /* OllamaCore */,
 			);
 		};
 /* End PBXProject section */
@@ -227,10 +303,31 @@
 				00000001000000000000000B /* BackgroundTaskManager.swift in Sources */,
 				00000001000000000000000D /* AppModels.swift in Sources */,
 				000000010000000000000018 /* SurfaceSectionCard.swift in Sources */,
+				000000010000000000000019 /* UnifiedModelCatalog.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		000000010000000000000612 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				00000001000000000000001A /* CoreTypes.swift in Sources */,
+				00000001000000000000001B /* ModelRegistry.swift in Sources */,
+				00000001000000000000001C /* DeviceCapabilityService.swift in Sources */,
+				00000001000000000000001D /* GGUFBackend.swift in Sources */,
+				00000001000000000000001E /* RuntimeCoordinator.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		000000010000000000000901 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 000000010000000000000610 /* OllamaCore */;
+			targetProxy = 000000010000000000000900 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		000000010000000000000800 /* Debug */ = {
@@ -346,6 +443,48 @@
 			};
 			name = Release;
 		};
+		000000010000000000000804 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ollamakit.core;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		000000010000000000000805 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ollamakit.core;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -354,6 +493,15 @@
 			buildConfigurations = (
 				000000010000000000000802 /* Debug */,
 				000000010000000000000803 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		000000010000000000000611 /* Build configuration list for PBXNativeTarget "OllamaCore" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				000000010000000000000804 /* Debug */,
+				000000010000000000000805 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

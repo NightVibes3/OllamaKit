@@ -487,7 +487,7 @@ struct InterfaceSettingsSection: View {
 struct DataManagementSection: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var chatSessions: [ChatSession]
-    @Query private var downloadedModels: [DownloadedModel]
+    @StateObject private var modelStore = ModelStorage.shared
 
     @State private var showingClearChatsConfirmation = false
     @State private var showingClearModelsConfirmation = false
@@ -527,7 +527,7 @@ struct DataManagementSection: View {
                         Text("Delete All Models")
                             .font(.system(size: 16, weight: .medium))
                             .foregroundStyle(.red)
-                        Text("Remove all downloaded models")
+                        Text("Remove all imported and downloaded models")
                             .font(.system(size: 13))
                             .foregroundStyle(.secondary)
                     }
@@ -559,20 +559,13 @@ struct DataManagementSection: View {
                     await ServerManager.shared.stopServer()
                     BackgroundTaskManager.shared.cancelScheduledBackgroundTask()
                     ModelRunner.shared.unloadModel()
-
-                    for model in downloadedModels {
-                        if !model.localPath.isEmpty {
-                            try? FileManager.default.removeItem(atPath: model.localPath)
-                        }
-                        modelContext.delete(model)
-                    }
-                    try? modelContext.save()
+                    await modelStore.deleteAllInstalledModels()
                     AppSettings.shared.defaultModelId = ""
                     HapticManager.notification(.warning)
                 }
             }
         } message: {
-            Text("This will permanently delete all downloaded models. You'll need to re-download them to use them again.")
+            Text("This will permanently delete all downloaded and imported models. You'll need to add them again to use them.")
         }
     }
 }

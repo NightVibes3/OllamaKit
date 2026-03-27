@@ -165,14 +165,14 @@ struct EmptyChatsView: View {
 struct NewChatSheet: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
-    @Query(filter: #Predicate<DownloadedModel> { $0.isDownloaded == true }) private var models: [DownloadedModel]
+    @StateObject private var modelStore = ModelStorage.shared
     
-    @State private var selectedModel: DownloadedModel?
+    @State private var selectedModel: ModelSnapshot?
     @State private var systemPrompt = ""
     @State private var showingCustomPrompt = false
 
-    private var availableModels: [DownloadedModel] {
-        BuiltInModelCatalog.selectionModels(downloadedModels: models)
+    private var availableModels: [ModelSnapshot] {
+        BuiltInModelCatalog.selectionModels(downloadedModels: modelStore.selectionSnapshots)
     }
 
     private var appleAvailability: BuiltInModelAvailability {
@@ -297,11 +297,14 @@ struct NewChatSheet: View {
         }
         .onAppear {
             if selectedModel == nil, !AppSettings.shared.defaultModelId.isEmpty {
-                selectedModel = BuiltInModelCatalog.resolveStoredReference(AppSettings.shared.defaultModelId, in: models)
+                selectedModel = BuiltInModelCatalog.resolveStoredReference(AppSettings.shared.defaultModelId, in: modelStore.selectionSnapshots)
             }
             if systemPrompt.isEmpty {
                 systemPrompt = "You are a helpful assistant."
             }
+        }
+        .task {
+            await modelStore.refresh()
         }
     }
     
@@ -325,7 +328,7 @@ struct NewChatSheet: View {
 }
 
 struct ModelSelectionRow: View {
-    let model: DownloadedModel
+    let model: ModelSnapshot
     let isSelected: Bool
 
     private var appleAvailability: BuiltInModelAvailability {

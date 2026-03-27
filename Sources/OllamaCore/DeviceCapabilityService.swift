@@ -1,0 +1,306 @@
+import Foundation
+
+#if canImport(UIKit)
+import UIKit
+#endif
+
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
+
+public actor DeviceCapabilityService {
+    public static let shared = DeviceCapabilityService()
+
+    public func currentProfile() -> DeviceProfile {
+        let physicalMemory = Int64(ProcessInfo.processInfo.physicalMemory)
+        let machineIdentifier = machineIdentifier()
+        let recommendedBudget = max(
+            min(Int64(Double(physicalMemory) * 0.30), physicalMemory - 3_000_000_000),
+            1_500_000_000
+        )
+        let supportedBudget = max(
+            min(Int64(Double(physicalMemory) * 0.42), physicalMemory - 2_000_000_000),
+            recommendedBudget
+        )
+
+        return DeviceProfile(
+            machineIdentifier: machineIdentifier,
+            chipFamily: chipFamily(for: machineIdentifier),
+            systemVersion: systemVersionString(),
+            physicalMemoryBytes: physicalMemory,
+            recommendedGGUFBudgetBytes: recommendedBudget,
+            supportedGGUFBudgetBytes: supportedBudget
+        )
+    }
+
+    public func compatibility(for entry: ModelCatalogEntry) async -> CompatibilityReport {
+        switch entry.backendKind {
+        case .ggufLlama:
+            return await compatibilityForGGUFSize(entry.capabilitySummary.sizeBytes)
+        case .appleFoundation:
+            return await appleFoundationAvailability()
+        case .coreMLPackage:
+            return await compatibilityForCoreMLPackage(entry)
+        }
+    }
+
+    public func compatibilityForGGUFSize(_ sizeBytes: Int64?) async -> CompatibilityReport {
+        let profile = currentProfile()
+        guard let sizeBytes, sizeBytes > 0 else {
+            return CompatibilityReport(
+                backendKind: .ggufLlama,
+                level: .unknown,
+                title: "Unknown Size",
+                message: "This GGUF file has no size metadata yet."
+            )
+        }
+
+        if sizeBytes <= profile.recommendedGGUFBudgetBytes {
+            return CompatibilityReport(
+                backendKind: .ggufLlama,
+                level: .recommended,
+                title: "Recommended",
+                message: "This GGUF file is within the recommended budget for \(profile.deviceLabel)."
+            )
+        }
+
+        if sizeBytes <= profile.supportedGGUFBudgetBytes {
+            return CompatibilityReport(
+                backendKind: .ggufLlama,
+                level: .supported,
+                title: "May Run",
+                message: "This GGUF file is larger than recommended for \(profile.deviceLabel), but it still has a realistic chance of loading."
+            )
+        }
+
+        return CompatibilityReport(
+            backendKind: .ggufLlama,
+            level: .unavailable,
+            title: "Too Large",
+            message: "This GGUF file is above the likely working size for \(profile.deviceLabel)."
+        )
+    }
+
+    public func appleFoundationAvailability() async -> CompatibilityReport {
+        #if canImport(FoundationModels)
+        guard #available(iOS 26.0, *) else {
+            return CompatibilityReport(
+                backendKind: .appleFoundation,
+                level: .unavailable,
+                title: "Unavailable",
+                message: "Apple's built-in on-device model requires iOS 26 or newer."
+            )
+        }
+
+        let model = SystemLanguageModel.default
+        guard model.supportsLocale() else {
+            return CompatibilityReport(
+                backendKind: .appleFoundation,
+                level: .unavailable,
+                title: "Unavailable",
+                message: "Apple Intelligence is not enabled for the current language or locale."
+            )
+        }
+
+        if case .available = model.availability {
+            return CompatibilityReport(
+                backendKind: .appleFoundation,
+                level: .supported,
+                title: "Available",
+                message: "Uses Apple's built-in on-device Foundation Models runtime."
+            )
+        }
+
+        let availabilityDescription = String(describing: model.availability)
+        if availabilityDescription.localizedCaseInsensitiveContains("deviceNotEligible") {
+            return CompatibilityReport(
+                backendKind: .appleFoundation,
+                level: .unavailable,
+                title: "Unavailable",
+                message: "This device is not eligible for Apple's on-device model."
+            )
+        }
+        if availabilityDescription.localizedCaseInsensitiveContains("appleIntelligenceNotEnabled") {
+            return CompatibilityReport(
+                backendKind: .appleFoundation,
+                level: .unavailable,
+                title: "Unavailable",
+                message: "Turn on Apple Intelligence to use Apple's on-device model."
+            )
+        }
+        if availabilityDescription.localizedCaseInsensitiveContains("modelNotReady") {
+            return CompatibilityReport(
+                backendKind: .appleFoundation,
+                level: .unavailable,
+                title: "Unavailable",
+                message: "Apple's on-device model is still preparing on this device."
+            )
+        }
+
+        return CompatibilityReport(
+            backendKind: .appleFoundation,
+            level: .unavailable,
+            title: "Unavailable",
+            message: "Apple's on-device model is unavailable on this device."
+        )
+        #else
+        return CompatibilityReport(
+            backendKind: .appleFoundation,
+            level: .unavailable,
+            title: "Unavailable",
+            message: "This build does not include Apple's Foundation Models framework."
+        )
+        #endif
+    }
+
+    public func compatibilityForCoreMLPackage(_ entry: ModelCatalogEntry) async -> CompatibilityReport {
+        guard let packageRootURL = entry.packageRootURL else {
+            return CompatibilityReport(
+                backendKind: .coreMLPackage,
+                level: .unavailable,
+                title: "Unavailable",
+                message: "This CoreML package is missing its package root."
+            )
+        }
+
+        guard FileManager.default.fileExists(atPath: packageRootURL.path) else {
+            return CompatibilityReport(
+                backendKind: .coreMLPackage,
+                level: .unavailable,
+                title: "Unavailable",
+                message: "This CoreML package no longer exists on disk."
+            )
+        }
+
+        if let manifestURL = entry.manifestURL,
+           FileManager.default.fileExists(atPath: manifestURL.path),
+           let data = try? Data(contentsOf: manifestURL),
+           let manifest = try? JSONDecoder().decode(ModelPackageManifest.self, from: data),
+           let minimumOSVersion = manifest.minimumOSVersion,
+           !supports(minimumOSVersion: minimumOSVersion) {
+            return CompatibilityReport(
+                backendKind: .coreMLPackage,
+                level: .unavailable,
+                title: "Unavailable",
+                message: "This CoreML package requires iOS \(minimumOSVersion) or newer."
+            )
+        }
+
+        let hasRecognizedPayload = packageContainsRecognizedPayload(packageRootURL)
+        guard hasRecognizedPayload else {
+            return CompatibilityReport(
+                backendKind: .coreMLPackage,
+                level: .unavailable,
+                title: "Unavailable",
+                message: "The imported package does not contain a recognized CoreML model payload."
+            )
+        }
+
+        return CompatibilityReport(
+            backendKind: .coreMLPackage,
+            level: .supported,
+            title: "Imported",
+            message: "This CoreML package is structurally valid and can be managed by the app. Execution support depends on the package runtime included in the build."
+        )
+    }
+
+    private func machineIdentifier() -> String {
+        var systemInfo = utsname()
+        uname(&systemInfo)
+        var machine = systemInfo.machine
+        let capacity = MemoryLayout.size(ofValue: machine)
+
+        return withUnsafePointer(to: &machine) { pointer in
+            pointer.withMemoryRebound(to: CChar.self, capacity: capacity) { charPointer in
+                String(cString: charPointer)
+            }
+        }
+    }
+
+    private func systemVersionString() -> String {
+        #if canImport(UIKit)
+        return UIDevice.current.systemVersion
+        #else
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        return "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)"
+        #endif
+    }
+
+    private func chipFamily(for machineIdentifier: String) -> String {
+        let identifier = machineIdentifier.lowercased()
+
+        if identifier.hasPrefix("realitydevice") {
+            return "Apple M-Series"
+        }
+
+        if identifier.hasPrefix("arm64") {
+            return "Apple Silicon"
+        }
+
+        if identifier.hasPrefix("iphone18") {
+            return "Apple A19"
+        }
+        if identifier.hasPrefix("iphone17") {
+            return "Apple A18"
+        }
+        if identifier.hasPrefix("iphone16") {
+            return "Apple A17"
+        }
+        if identifier.hasPrefix("iphone15") {
+            return "Apple A16"
+        }
+        if identifier.hasPrefix("iphone14") {
+            return "Apple A15"
+        }
+        if identifier.hasPrefix("iphone13") {
+            return "Apple A14"
+        }
+
+        if identifier.hasPrefix("ipad16,3") || identifier.hasPrefix("ipad16,4") || identifier.hasPrefix("ipad16,5") || identifier.hasPrefix("ipad16,6") {
+            return "Apple M4"
+        }
+        if identifier.hasPrefix("ipad15") {
+            return "Apple M3 / A16"
+        }
+        if identifier.hasPrefix("ipad14") {
+            return "Apple M2 / A15"
+        }
+        if identifier.hasPrefix("ipad13") {
+            return "Apple M1 / A14"
+        }
+
+        return "Apple Silicon"
+    }
+
+    private func supports(minimumOSVersion: String) -> Bool {
+        let versionComponents = minimumOSVersion.split(separator: ".").compactMap { Int($0) }
+        let requiredMajor = versionComponents.first ?? 0
+        let requiredMinor = versionComponents.dropFirst().first ?? 0
+        let current = ProcessInfo.processInfo.operatingSystemVersion
+
+        if current.majorVersion != requiredMajor {
+            return current.majorVersion > requiredMajor
+        }
+
+        return current.minorVersion >= requiredMinor
+    }
+
+    private func packageContainsRecognizedPayload(_ packageRootURL: URL) -> Bool {
+        guard let enumerator = FileManager.default.enumerator(
+            at: packageRootURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return false
+        }
+
+        for case let fileURL as URL in enumerator {
+            let pathExtension = fileURL.pathExtension.lowercased()
+            if pathExtension == "mlmodelc" || pathExtension == "mlpackage" {
+                return true
+            }
+        }
+
+        return false
+    }
+}

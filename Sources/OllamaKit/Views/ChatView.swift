@@ -4,9 +4,9 @@ import SwiftData
 struct ChatView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
-    @Query(filter: #Predicate<DownloadedModel> { $0.isDownloaded == true }) private var downloadedModels: [DownloadedModel]
     @Bindable var session: ChatSession
     
+    @StateObject private var modelStore = ModelStorage.shared
     @StateObject private var viewModel = ChatViewModel()
     @State private var messageText = ""
     @State private var showingModelSelector = false
@@ -20,7 +20,7 @@ struct ChatView: View {
     }
 
     private var downloadedModelRevision: [String] {
-        downloadedModels.map { "\($0.id.uuidString)|\($0.modelId)|\($0.localPath)" }
+        modelStore.selectionSnapshots.map { "\($0.catalogId)|\($0.modelId)|\($0.localPath)|\($0.packageRootPath)" }
     }
 
     var body: some View {
@@ -165,6 +165,7 @@ struct ChatView: View {
             ModelSelectorSheet(selectedModel: $viewModel.currentModel)
         }
         .task {
+            await modelStore.refresh()
             syncCurrentModelSelection()
         }
         .onChange(of: downloadedModelRevision) {
@@ -240,7 +241,7 @@ struct ChatView: View {
     }
 
     private func syncCurrentModelSelection() {
-        if let matchingModel = BuiltInModelCatalog.resolveStoredReference(session.modelId, in: downloadedModels) {
+        if let matchingModel = BuiltInModelCatalog.resolveStoredReference(session.modelId, in: modelStore.selectionSnapshots) {
             if viewModel.currentModel?.id != matchingModel.id {
                 viewModel.currentModel = matchingModel
             }
@@ -398,11 +399,11 @@ struct TypingIndicator: View {
 
 struct ModelSelectorSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @Query(filter: #Predicate<DownloadedModel> { $0.isDownloaded == true }) private var models: [DownloadedModel]
-    @Binding var selectedModel: DownloadedModel?
+    @StateObject private var modelStore = ModelStorage.shared
+    @Binding var selectedModel: ModelSnapshot?
 
-    private var availableModels: [DownloadedModel] {
-        BuiltInModelCatalog.selectionModels(downloadedModels: models)
+    private var availableModels: [ModelSnapshot] {
+        BuiltInModelCatalog.selectionModels(downloadedModels: modelStore.selectionSnapshots)
     }
 
     private var appleAvailability: BuiltInModelAvailability {
@@ -475,13 +476,16 @@ struct ModelSelectorSheet: View {
                 }
             }
         }
+        .task {
+            await modelStore.refresh()
+        }
     }
 }
 
 @MainActor
 class ChatViewModel: ObservableObject {
     @Published var isGenerating = false
-    @Published var currentModel: DownloadedModel?
+    @Published var currentModel: ModelSnapshot?
     @Published var errorMessage: String?
     @Published var streamRevision = 0
     
@@ -522,47 +526,30 @@ class ChatViewModel: ObservableObject {
             appendAssistantCue: true
         )
 
-        var parameters = ModelParameters.default
+        var parameters = ModelParameters.appDefault
         parameters.stopSequences = PromptComposer.defaultChatStopSequences
         let guardedSystemPrompt = PromptComposer.guardedSystemPrompt(session.systemPrompt)
         
         do {
-            let result: GenerationResult
+            try await ModelRunner.shared.loadModel(
+                catalogId: model.catalogId,
+                contextLength: model.runtimeContextLength,
+                gpuLayers: AppSettings.shared.gpuLayers
+            )
 
-            if model.isBuiltInAppleModel {
-                result = try await AppleFoundationModelService.shared.generate(
-                    prompt: conversationPrompt,
-                    systemPrompt: guardedSystemPrompt
-                )
-            } else {
-                guard !model.localPath.isEmpty else {
-                    throw ModelError.invalidPath
-                }
+            var generatedText = ""
+            let shouldStreamInUI = AppSettings.shared.streamingEnabled
 
-                guard FileManager.default.fileExists(atPath: model.localPath) else {
-                    throw ModelError.modelNotFound
-                }
-
-                try await ModelRunner.shared.loadModel(
-                    from: model.localPath,
-                    contextLength: model.runtimeContextLength,
-                    gpuLayers: AppSettings.shared.gpuLayers
-                )
-
-                var generatedText = ""
-                let shouldStreamInUI = AppSettings.shared.streamingEnabled
-
-                result = try await ModelRunner.shared.generate(
-                    prompt: conversationPrompt,
-                    systemPrompt: guardedSystemPrompt,
-                    parameters: parameters
-                ) { token in
-                    guard shouldStreamInUI else { return }
-                    generatedText += token
-                    Task { @MainActor in
-                        assistantMessage.content = generatedText
-                        self.streamRevision += 1
-                    }
+            let result = try await ModelRunner.shared.generate(
+                prompt: conversationPrompt,
+                systemPrompt: guardedSystemPrompt,
+                parameters: parameters
+            ) { token in
+                guard shouldStreamInUI else { return }
+                generatedText += token
+                Task { @MainActor in
+                    assistantMessage.content = generatedText
+                    self.streamRevision += 1
                 }
             }
             
@@ -607,9 +594,6 @@ class ChatViewModel: ObservableObject {
     
     func stopGeneration() {
         ModelRunner.shared.stopGeneration()
-        Task {
-            await AppleFoundationModelService.shared.stopGeneration()
-        }
         Task { @MainActor in
             HapticManager.impact(.medium)
         }
