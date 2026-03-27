@@ -160,67 +160,85 @@ struct GlassCard<Content: View>: View {
 struct AnimatedMeshBackground: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var phase: Double = 0
-
-    private let colors: [Color] = [
-        .purple.opacity(0.3),
-        .blue.opacity(0.2),
-        .cyan.opacity(0.3),
-        .purple.opacity(0.2),
-        .blue.opacity(0.2),
-        .indigo.opacity(0.15),
-        .blue.opacity(0.2),
-        .cyan.opacity(0.15),
-        .indigo.opacity(0.3),
-        .purple.opacity(0.2),
-        .blue.opacity(0.25),
-        .indigo.opacity(0.2),
-        .purple.opacity(0.2),
-        .blue.opacity(0.15),
-        .cyan.opacity(0.2),
-        .purple.opacity(0.15)
-    ]
     
     var body: some View {
-        TimelineView(.animation(minimumInterval: reduceMotion ? 0.25 : 0.1)) { _ in
-            MeshGradient(
-                width: 4,
-                height: 4,
-                points: animatedPoints(for: phase),
-                colors: colors
-            )
+        GeometryReader { proxy in
+            let size = proxy.size
+
+            ZStack {
+                Color.black
+
+                backgroundBlob(
+                    color: Color.cyan.opacity(0.22),
+                    size: CGSize(width: size.width * 1.15, height: size.height * 0.48),
+                    offset: CGSize(
+                        width: sin(phase * 0.8) * 28,
+                        height: -size.height * 0.24 + cos(phase * 0.6) * 22
+                    )
+                )
+
+                backgroundBlob(
+                    color: Color.blue.opacity(0.20),
+                    size: CGSize(width: size.width * 1.25, height: size.height * 0.68),
+                    offset: CGSize(
+                        width: size.width * 0.16 + cos(phase * 0.5) * 24,
+                        height: sin(phase * 0.7) * 20
+                    )
+                )
+
+                backgroundBlob(
+                    color: Color.purple.opacity(0.18),
+                    size: CGSize(width: size.width * 1.05, height: size.height * 0.54),
+                    offset: CGSize(
+                        width: -size.width * 0.2 + sin(phase * 0.65) * 26,
+                        height: size.height * 0.27 + cos(phase * 0.5) * 20
+                    )
+                )
+
+                LinearGradient(
+                    colors: [
+                        Color.black.opacity(0.05),
+                        Color.black.opacity(0.2),
+                        Color.black.opacity(0.55)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .onAppear {
             guard !reduceMotion else {
-                phase = .pi * 0.5
+                phase = .pi * 0.35
                 return
             }
 
-            withAnimation(.linear(duration: 24).repeatForever(autoreverses: false)) {
+            withAnimation(.easeInOut(duration: 18).repeatForever(autoreverses: true)) {
                 phase = .pi * 2
             }
         }
         .ignoresSafeArea()
     }
 
-    private func animatedPoints(for phase: Double) -> [SIMD2<Float>] {
-        [
-            SIMD2(Float(sin(phase) * 0.1), Float(cos(phase * 0.7) * 0.1)),
-            SIMD2(Float(0.3 + sin(phase * 0.8) * 0.1), Float(0.2 + cos(phase) * 0.1)),
-            SIMD2(Float(0.7 + sin(phase * 0.6) * 0.1), Float(0.1 + cos(phase * 0.9) * 0.1)),
-            SIMD2(Float(1 + sin(phase * 0.5) * 0.1), Float(cos(phase * 0.8) * 0.1)),
-            SIMD2(Float(0.1 + sin(phase * 0.7) * 0.1), Float(0.4 + cos(phase * 0.6) * 0.1)),
-            SIMD2(Float(0.4 + sin(phase) * 0.1), Float(0.5 + cos(phase * 0.7) * 0.1)),
-            SIMD2(Float(0.6 + sin(phase * 0.8) * 0.1), Float(0.4 + cos(phase * 0.5) * 0.1)),
-            SIMD2(Float(0.9 + sin(phase * 0.6) * 0.1), Float(0.5 + cos(phase) * 0.1)),
-            SIMD2(Float(sin(phase * 0.5) * 0.1), Float(0.8 + cos(phase * 0.8) * 0.1)),
-            SIMD2(Float(0.3 + sin(phase * 0.9) * 0.1), Float(0.7 + cos(phase * 0.6) * 0.1)),
-            SIMD2(Float(0.7 + sin(phase * 0.7) * 0.1), Float(0.8 + cos(phase * 0.9) * 0.1)),
-            SIMD2(Float(1 + sin(phase * 0.8) * 0.1), Float(0.7 + cos(phase * 0.5) * 0.1)),
-            SIMD2(Float(0.2 + sin(phase) * 0.1), Float(1 + cos(phase * 0.7) * 0.1)),
-            SIMD2(Float(0.5 + sin(phase * 0.6) * 0.1), Float(1 + cos(phase * 0.8) * 0.1)),
-            SIMD2(Float(0.8 + sin(phase * 0.8) * 0.1), Float(1 + cos(phase * 0.6) * 0.1)),
-            SIMD2(Float(1 + sin(phase * 0.5) * 0.1), Float(1 + cos(phase) * 0.1))
-        ]
+    private func backgroundBlob(color: Color, size: CGSize, offset: CGSize) -> some View {
+        Ellipse()
+            .fill(
+                RadialGradient(
+                    colors: [
+                        color,
+                        color.opacity(0.55),
+                        color.opacity(0.18),
+                        .clear
+                    ],
+                    center: .center,
+                    startRadius: 24,
+                    endRadius: max(size.width, size.height) * 0.5
+                )
+            )
+            .frame(width: size.width, height: size.height)
+            .offset(offset)
+            .blur(radius: 72)
+            .blendMode(.screen)
     }
 }
 

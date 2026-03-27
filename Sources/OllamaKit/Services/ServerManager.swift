@@ -447,7 +447,8 @@ final class ServerManager {
                 }
 
                 return PromptTurn(role: role, content: content)
-            }
+            },
+            appendAssistantCue: true
         )
 
         let stream = json["stream"] as? Bool ?? true
@@ -559,7 +560,8 @@ final class ServerManager {
                 }
 
                 return PromptTurn(role: role, content: content)
-            }
+            },
+            appendAssistantCue: true
         )
 
         let stream = json["stream"] as? Bool ?? false

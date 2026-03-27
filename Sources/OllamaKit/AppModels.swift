@@ -267,7 +267,11 @@ struct PromptTurn: Sendable {
 }
 
 enum PromptComposer {
-    static func compose(systemPrompt: String? = nil, messages: [PromptTurn]) -> String {
+    static func compose(
+        systemPrompt: String? = nil,
+        messages: [PromptTurn],
+        appendAssistantCue: Bool = false
+    ) -> String {
         let systemBlock = systemPrompt?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nonEmpty
@@ -283,7 +287,9 @@ enum PromptComposer {
             .compactMap { $0 }
             .joined(separator: "\n\n")
 
-        return [systemBlock, conversation.nonEmpty]
+        let assistantCue = appendAssistantCue ? "Assistant:\n" : nil
+
+        return [systemBlock, conversation.nonEmpty, assistantCue]
             .compactMap { $0 }
             .joined(separator: "\n\n")
             .nonEmpty ?? ""

@@ -499,7 +499,8 @@ class ChatViewModel: ObservableObject {
 
         let conversationPrompt = PromptComposer.compose(
             systemPrompt: nil,
-            messages: existingPromptTurns + [PromptTurn(role: userMessage.roleValue, content: userMessage.content)]
+            messages: existingPromptTurns + [PromptTurn(role: userMessage.roleValue, content: userMessage.content)],
+            appendAssistantCue: true
         )
         
         do {
