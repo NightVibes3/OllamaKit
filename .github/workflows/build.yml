@@ -95,6 +95,8 @@ jobs:
         sudo xcode-select -s "$DEVELOPER_DIR"
         xcodebuild -showsdks
         xcodebuild -sdk iphoneos -version SDKVersion
+        sudo xcodebuild -downloadPlatform iOS
+        xcrun simctl runtime list
 
     - name: Build llama.cpp XCFramework
       run: |
