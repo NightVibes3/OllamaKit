@@ -426,7 +426,7 @@ final class CoreMLPackageBackend: InferenceBackend, @unchecked Sendable {
                         )
                         trimmed = (visible.visibleText, visible.shouldStop)
                     } else {
-                        trimmed = trimmedForStopSequences(accumulatedText, stopSequences: stopSequences)
+                        trimmed = self.trimmedForStopSequences(accumulatedText, stopSequences: stopSequences)
                     }
 
                     if trimmed.didMatchStopSequence {
@@ -669,8 +669,8 @@ final class CoreMLPackageBackend: InferenceBackend, @unchecked Sendable {
 
         for stopSequence in effectiveStopSequences {
             guard let range = text.range(of: stopSequence) else { continue }
-            if let earliestRange {
-                if range.lowerBound < earliestRange.lowerBound {
+            if let currentEarliestRange = earliestRange {
+                if range.lowerBound < currentEarliestRange.lowerBound {
                     earliestRange = range
                 }
             } else {
