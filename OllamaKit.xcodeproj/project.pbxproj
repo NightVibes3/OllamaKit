@@ -109,9 +109,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				00000001000000000000001F /* OllamaCore.framework in Frameworks */,
-				000000010000000000000016 /* Metal.framework in Frameworks */,
-				000000010000000000000015 /* Accelerate.framework in Frameworks */,
-				000000010000000000000014 /* llama.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
