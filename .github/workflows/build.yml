@@ -104,9 +104,21 @@ jobs:
         fi
 
         echo "Using $selected_xcode"
+        sudo xcode-select -s "$selected_xcode/Contents/Developer"
         echo "DEVELOPER_DIR=$selected_xcode/Contents/Developer" >> "$GITHUB_ENV"
+        sudo "$selected_xcode/Contents/Developer/usr/bin/xcodebuild" -runFirstLaunch
+        sudo "$selected_xcode/Contents/Developer/usr/bin/xcodebuild" -downloadPlatform iOS || true
         "$selected_xcode/Contents/Developer/usr/bin/xcodebuild" -version
         "$selected_xcode/Contents/Developer/usr/bin/xcodebuild" -showsdks
+
+    - name: Ensure iOS Platform Is Installed
+      run: |
+        set -eo pipefail
+        sudo xcode-select -s "$DEVELOPER_DIR"
+        sudo xcodebuild -runFirstLaunch
+        sudo xcodebuild -downloadPlatform iOS
+        xcodebuild -showsdks
+        xcodebuild -project OllamaKit.xcodeproj -scheme OllamaKit -showdestinations
 
     - name: Build llama.cpp XCFramework
       run: |
