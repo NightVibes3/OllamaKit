@@ -23,38 +23,29 @@ final class ServerManager {
     }
 
     func startServer() async {
-        stateLock.lock()
-        let canStart = !isRunning && !isStarting && listener == nil
-        if canStart {
-            isStarting = true
+        let canStart = stateLock.withLock { () -> Bool in
+            let canStart = !isRunning && !isStarting && listener == nil
+            if canStart {
+                isStarting = true
+            }
+            return canStart
         }
-        stateLock.unlock()
         guard canStart else { return }
 
         let configuredPort = AppSettings.shared.serverPort
         guard (1024...Int(UInt16.max)).contains(configuredPort),
               let port = NWEndpoint.Port(rawValue: UInt16(configuredPort))
         else {
-            stateLock.lock()
-            isStarting = false
-            stateLock.unlock()
+            stateLock.withLock {
+                isStarting = false
+            }
             print("Invalid server port: \(configuredPort)")
             return
         }
 
         do {
             let newListener = try NWListener(using: .tcp, on: port)
-            let resumeLock = NSLock()
-            var didResume = false
-
-            func resumeStartupIfNeeded(_ continuation: CheckedContinuation<Void, Never>) {
-                resumeLock.lock()
-                defer { resumeLock.unlock() }
-
-                guard !didResume else { return }
-                didResume = true
-                continuation.resume()
-            }
+            let startupGate = ContinuationGate()
 
             newListener.stateUpdateHandler = { [weak self] state in
                 self?.handleListenerState(state, port: port)
@@ -62,12 +53,13 @@ final class ServerManager {
                 switch state {
                 case .ready, .failed, .cancelled:
                     guard let self else { return }
-                    self.stateLock.lock()
-                    let continuation = self.startupContinuation
-                    self.startupContinuation = nil
-                    self.stateLock.unlock()
+                    let continuation = self.stateLock.withLock { () -> CheckedContinuation<Void, Never>? in
+                        let continuation = self.startupContinuation
+                        self.startupContinuation = nil
+                        return continuation
+                    }
                     if let continuation {
-                        resumeStartupIfNeeded(continuation)
+                        startupGate.resumeIfNeeded(continuation)
                     }
                 default:
                     break
@@ -77,42 +69,43 @@ final class ServerManager {
                 self?.handleConnection(connection)
             }
 
-            stateLock.lock()
-            listener = newListener
-            stateLock.unlock()
+            stateLock.withLock {
+                listener = newListener
+            }
             await withCheckedContinuation { continuation in
-                stateLock.lock()
-                startupContinuation = continuation
-                stateLock.unlock()
+                stateLock.withLock {
+                    startupContinuation = continuation
+                }
                 newListener.start(queue: queue)
             }
         } catch {
-            stateLock.lock()
-            isStarting = false
-            stateLock.unlock()
+            stateLock.withLock {
+                isStarting = false
+            }
             print("Failed to create listener: \(error)")
         }
     }
 
     func stopServer() async {
-        stateLock.lock()
-        let currentListener = listener
-        listener = nil
-        let activeConnections = Array(connections.values)
-        connections.removeAll()
-        isRunning = false
-        isStarting = false
-        let continuation = startupContinuation
-        startupContinuation = nil
-        stateLock.unlock()
+        let state = stateLock.withLock { () -> (NWListener?, [NWConnection], CheckedContinuation<Void, Never>?) in
+            let currentListener = listener
+            listener = nil
+            let activeConnections = Array(connections.values)
+            connections.removeAll()
+            isRunning = false
+            isStarting = false
+            let continuation = startupContinuation
+            startupContinuation = nil
+            return (currentListener, activeConnections, continuation)
+        }
 
-        currentListener?.cancel()
+        state.0?.cancel()
 
-        for connection in activeConnections {
+        for connection in state.1 {
             connection.cancel()
         }
 
-        continuation?.resume()
+        state.2?.resume()
     }
 
     func restartServerIfRunning() async {
@@ -126,50 +119,47 @@ final class ServerManager {
     }
 
     var isServerRunning: Bool {
-        stateLock.lock()
-        let currentValue = isRunning
-        stateLock.unlock()
-        return currentValue
+        stateLock.withLock { isRunning }
     }
 
     private func handleListenerState(_ state: NWListener.State, port: NWEndpoint.Port) {
         switch state {
         case .ready:
-            stateLock.lock()
-            isRunning = true
-            isStarting = false
-            stateLock.unlock()
+            stateLock.withLock {
+                isRunning = true
+                isStarting = false
+            }
             print("Server listening on port \(port)")
         case .failed(let error):
-            stateLock.lock()
-            isRunning = false
-            isStarting = false
-            listener = nil
-            stateLock.unlock()
+            stateLock.withLock {
+                isRunning = false
+                isStarting = false
+                listener = nil
+            }
             print("Server failed: \(error)")
         case .cancelled:
-            stateLock.lock()
-            isRunning = false
-            isStarting = false
-            listener = nil
-            stateLock.unlock()
+            stateLock.withLock {
+                isRunning = false
+                isStarting = false
+                listener = nil
+            }
         default:
             break
         }
     }
 
     private func handleConnection(_ connection: NWConnection) {
-        stateLock.lock()
-        connections[ObjectIdentifier(connection)] = connection
-        stateLock.unlock()
+        stateLock.withLock {
+            connections[ObjectIdentifier(connection)] = connection
+        }
 
         connection.stateUpdateHandler = { [weak self] state in
             switch state {
             case .cancelled, .failed:
                 guard let self else { return }
-                self.stateLock.lock()
-                self.connections.removeValue(forKey: ObjectIdentifier(connection))
-                self.stateLock.unlock()
+                self.stateLock.withLock {
+                    self.connections.removeValue(forKey: ObjectIdentifier(connection))
+                }
             default:
                 break
             }
@@ -677,7 +667,7 @@ final class ServerManager {
                     modelId: modelId
                 ) { _ in }
 
-                await ModelStorage.shared.upsertDownloadedModel(downloadedModel)
+                await ModelStorage.shared.upsertDownloadedModel(downloadedModel.registrySeed)
 
                 let finalBody: [String: Any] = [
                     "status": "success",
@@ -1519,5 +1509,29 @@ final class ServerManager {
         default:
             return "server_error"
         }
+    }
+}
+
+private final class ContinuationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var didResume = false
+
+    func resumeIfNeeded(_ continuation: CheckedContinuation<Void, Never>) {
+        let shouldResume = lock.withLock { () -> Bool in
+            guard !didResume else { return false }
+            didResume = true
+            return true
+        }
+
+        guard shouldResume else { return }
+        continuation.resume()
+    }
+}
+
+private extension NSLock {
+    func withLock<T>(_ body: () throws -> T) rethrows -> T {
+        lock()
+        defer { unlock() }
+        return try body()
     }
 }

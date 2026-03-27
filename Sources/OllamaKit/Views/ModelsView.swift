@@ -1192,7 +1192,7 @@ class ModelSearchViewModel: ObservableObject {
                 }
             }
 
-            await ModelStorage.shared.upsertDownloadedModel(model)
+            await ModelStorage.shared.upsertDownloadedModel(model.registrySeed)
             downloadProgress = 100
             HapticManager.notification(.success)
         } catch {

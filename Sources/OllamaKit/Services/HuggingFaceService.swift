@@ -1,6 +1,6 @@
 import Foundation
 
-final class HuggingFaceService {
+final class HuggingFaceService: @unchecked Sendable {
     static let shared = HuggingFaceService()
 
     private struct ActiveDownload {

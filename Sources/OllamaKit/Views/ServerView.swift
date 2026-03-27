@@ -40,7 +40,7 @@ struct ServerView: View {
         .onAppear {
             viewModel.refreshStatus()
         }
-        .onChange(of: settings.serverEnabled) { enabled in
+        .onChange(of: settings.serverEnabled) { _, enabled in
             Task {
                 if enabled {
                     await viewModel.startServer()
@@ -49,12 +49,12 @@ struct ServerView: View {
                 }
             }
         }
-        .onChange(of: settings.serverPort) { _ in
+        .onChange(of: settings.serverPort) {
             Task {
                 await viewModel.restartServerIfNeeded()
             }
         }
-        .onChange(of: settings.allowExternalConnections) { _ in
+        .onChange(of: settings.allowExternalConnections) {
             Task {
                 await viewModel.restartServerIfNeeded()
             }

@@ -230,16 +230,16 @@ final class ModelStorage: ObservableObject {
         }
     }
 
-    func upsertDownloadedModel(_ model: DownloadedModel) async {
+    func upsertDownloadedModel(_ seed: DownloadedModelSeed) async {
         do {
             _ = try await ModelRegistryStore.shared.registerDownloadedGGUF(
-                sourceModelID: model.modelId,
-                displayName: model.name,
-                localPath: model.localPath,
-                size: model.size,
-                quantization: model.quantization,
-                parameterCountLabel: model.parameters,
-                contextLength: model.contextLength
+                sourceModelID: seed.modelId,
+                displayName: seed.name,
+                localPath: seed.localPath,
+                size: seed.size,
+                quantization: seed.quantization,
+                parameterCountLabel: seed.parameters,
+                contextLength: seed.contextLength
             )
             await refresh()
         } catch {

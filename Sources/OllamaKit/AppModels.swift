@@ -139,6 +139,30 @@ final class DownloadedModel {
     }
 }
 
+struct DownloadedModelSeed: Sendable {
+    let modelId: String
+    let name: String
+    let localPath: String
+    let size: Int64
+    let quantization: String
+    let parameters: String
+    let contextLength: Int
+}
+
+extension DownloadedModel {
+    var registrySeed: DownloadedModelSeed {
+        DownloadedModelSeed(
+            modelId: modelId,
+            name: name,
+            localPath: localPath,
+            size: size,
+            quantization: quantization,
+            parameters: parameters,
+            contextLength: contextLength
+        )
+    }
+}
+
 enum BuiltInModelAvailability: Equatable {
     case available(String)
     case unavailable(String)
