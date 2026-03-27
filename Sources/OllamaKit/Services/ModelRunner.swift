@@ -236,6 +236,7 @@ enum ModelError: Error, LocalizedError {
     case tokenizationError
     case decodeError
     case generationCancelled
+    case appleModelUnavailable(String)
 
     var errorDescription: String? {
         switch self {
@@ -257,6 +258,8 @@ enum ModelError: Error, LocalizedError {
             return "Model decoding failed."
         case .generationCancelled:
             return "Generation was cancelled."
+        case .appleModelUnavailable(let message):
+            return message
         }
     }
 }

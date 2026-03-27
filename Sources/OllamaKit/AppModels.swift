@@ -2,6 +2,9 @@ import Foundation
 import SwiftData
 import SwiftUI
 import UIKit
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
 
 @Model
 final class DownloadedModel {
@@ -18,6 +21,7 @@ final class DownloadedModel {
     var contextLength: Int
 
     init(
+        id: UUID = UUID(),
         name: String,
         modelId: String,
         localPath: String = "",
@@ -29,7 +33,7 @@ final class DownloadedModel {
         parameters: String = "Unknown",
         contextLength: Int = 4096
     ) {
-        self.id = UUID()
+        self.id = id
         self.name = name
         self.modelId = modelId
         self.localPath = localPath
@@ -73,6 +77,10 @@ final class DownloadedModel {
         }
 
         return "\(modelId)#\(name)"
+    }
+
+    var isBuiltInAppleModel: Bool {
+        modelId == BuiltInModelCatalog.appleOnDeviceModelID
     }
 
     func matchesStoredReference(_ candidate: String) -> Bool {
@@ -127,6 +135,102 @@ final class DownloadedModel {
             }
             .first?
             .1
+    }
+}
+
+enum BuiltInModelAvailability: Equatable {
+    case available(String)
+    case unavailable(String)
+
+    var isAvailable: Bool {
+        if case .available = self {
+            return true
+        }
+
+        return false
+    }
+
+    var title: String {
+        switch self {
+        case .available:
+            return "Available"
+        case .unavailable:
+            return "Unavailable"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .available(let detail), .unavailable(let detail):
+            return detail
+        }
+    }
+
+    var tint: Color {
+        isAvailable ? .green : .orange
+    }
+}
+
+enum BuiltInModelCatalog {
+    static let appleOnDeviceModelID = "apple/foundation-model"
+    static let appleOnDeviceModelName = "Apple On-Device"
+    private static let appleOnDeviceUUID = UUID(uuidString: "C2A7E4D7-5160-4CF9-8DE2-8F5B570C9E2A")!
+
+    static func appleOnDeviceModel() -> DownloadedModel {
+        DownloadedModel(
+            id: appleOnDeviceUUID,
+            name: appleOnDeviceModelName,
+            modelId: appleOnDeviceModelID,
+            localPath: "",
+            size: 0,
+            downloadDate: .distantPast,
+            isDownloaded: true,
+            isFavorite: false,
+            quantization: "Apple AI",
+            parameters: "Built In",
+            contextLength: max(AppSettings.shared.defaultContextLength, 2048)
+        )
+    }
+
+    static func selectionModels(downloadedModels: [DownloadedModel]) -> [DownloadedModel] {
+        [appleOnDeviceModel()] + downloadedModels
+    }
+
+    static func resolveStoredReference(_ candidate: String, in downloadedModels: [DownloadedModel]) -> DownloadedModel? {
+        DownloadedModel.resolveStoredReference(candidate, in: selectionModels(downloadedModels: downloadedModels))
+    }
+
+    static func availability() -> BuiltInModelAvailability {
+#if canImport(FoundationModels)
+        guard #available(iOS 26.0, *) else {
+            return .unavailable("Apple's on-device model requires iOS 26 or newer.")
+        }
+
+        let model = SystemLanguageModel.default
+
+        guard model.supportsLocale() else {
+            return .unavailable("Apple Intelligence is not enabled for the current language or locale.")
+        }
+
+        if case .available = model.availability {
+            return .available("Uses Apple's built-in on-device model through the Foundation Models framework. No download is required.")
+        }
+
+        let availabilityDescription = String(describing: model.availability)
+        if availabilityDescription.localizedCaseInsensitiveContains("deviceNotEligible") {
+            return .unavailable("This device is not eligible for Apple's on-device model.")
+        }
+        if availabilityDescription.localizedCaseInsensitiveContains("appleIntelligenceNotEnabled") {
+            return .unavailable("Turn on Apple Intelligence to use Apple's on-device model.")
+        }
+        if availabilityDescription.localizedCaseInsensitiveContains("modelNotReady") {
+            return .unavailable("Apple's on-device model is still preparing on this device.")
+        }
+
+        return .unavailable("Apple's on-device model is unavailable on this device.")
+#else
+        return .unavailable("This build does not include Apple's Foundation Models framework.")
+#endif
     }
 }
 
@@ -338,6 +442,84 @@ enum HapticManager {
         let generator = UINotificationFeedbackGenerator()
         generator.prepare()
         generator.notificationOccurred(type)
+    }
+}
+
+actor AppleFoundationModelService {
+    static let shared = AppleFoundationModelService()
+
+    private var activeTask: Task<GenerationResult, Error>?
+    private var activeRequestID = UUID()
+
+    func generate(prompt: String, systemPrompt: String?) async throws -> GenerationResult {
+        let availability = BuiltInModelCatalog.availability()
+        guard availability.isAvailable else {
+            throw ModelError.appleModelUnavailable(availability.detail)
+        }
+
+#if canImport(FoundationModels)
+        guard #available(iOS 26.0, *) else {
+            throw ModelError.appleModelUnavailable("Apple's on-device model requires iOS 26 or newer.")
+        }
+
+        stopGeneration()
+
+        let requestID = UUID()
+        activeRequestID = requestID
+
+        let normalizedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let instructions = systemPrompt?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
+
+        let task = Task<GenerationResult, Error> {
+            let startedAt = CFAbsoluteTimeGetCurrent()
+            let session: LanguageModelSession
+            if let instructions {
+                session = LanguageModelSession(instructions: instructions)
+            } else {
+                session = LanguageModelSession()
+            }
+            let response = try await session.respond(to: normalizedPrompt)
+            try Task.checkCancellation()
+
+            let elapsed = max(CFAbsoluteTimeGetCurrent() - startedAt, 0.001)
+            return GenerationResult(
+                text: response.content.trimmingCharacters(in: .whitespacesAndNewlines),
+                tokensGenerated: 0,
+                promptTokens: 0,
+                generationTime: elapsed,
+                tokensPerSecond: 0,
+                wasCancelled: false
+            )
+        }
+
+        activeTask = task
+
+        do {
+            let result = try await task.value
+            if activeRequestID == requestID {
+                activeTask = nil
+            }
+            return result
+        } catch is CancellationError {
+            if activeRequestID == requestID {
+                activeTask = nil
+            }
+            throw ModelError.generationCancelled
+        } catch {
+            if activeRequestID == requestID {
+                activeTask = nil
+            }
+            throw error
+        }
+#else
+        throw ModelError.appleModelUnavailable("This build does not include Apple's on-device model.")
+#endif
+    }
+
+    func stopGeneration() {
+        activeRequestID = UUID()
+        activeTask?.cancel()
+        activeTask = nil
     }
 }
 

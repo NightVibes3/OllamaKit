@@ -22,7 +22,7 @@ struct ChatView: View {
     private var downloadedModelRevision: [String] {
         downloadedModels.map { "\($0.id.uuidString)|\($0.modelId)|\($0.localPath)" }
     }
-    
+
     var body: some View {
         ZStack {
             AnimatedMeshBackground()
@@ -49,17 +49,17 @@ struct ChatView: View {
                         .padding(.horizontal, 16)
                         .padding(.vertical, 16)
                     }
-                    .onChange(of: session.orderedMessages.count) { _ in
+                    .onChange(of: session.orderedMessages.count) {
                         withAnimation {
                             proxy.scrollTo(bottomID, anchor: .bottom)
                         }
                     }
-                    .onChange(of: viewModel.isGenerating) { _ in
+                    .onChange(of: viewModel.isGenerating) {
                         withAnimation {
                             proxy.scrollTo(bottomID, anchor: .bottom)
                         }
                     }
-                    .onChange(of: viewModel.streamRevision) { _ in
+                    .onChange(of: viewModel.streamRevision) {
                         withAnimation(.easeOut(duration: 0.15)) {
                             proxy.scrollTo(bottomID, anchor: .bottom)
                         }
@@ -167,10 +167,10 @@ struct ChatView: View {
         .task {
             syncCurrentModelSelection()
         }
-        .onChange(of: downloadedModelRevision) { _ in
+        .onChange(of: downloadedModelRevision) {
             syncCurrentModelSelection()
         }
-        .onChange(of: viewModel.currentModel?.id) { _ in
+        .onChange(of: viewModel.currentModel?.id) {
             if let selectedModel = viewModel.currentModel {
                 session.modelId = selectedModel.persistentReference
                 session.updatedAt = Date()
@@ -240,7 +240,7 @@ struct ChatView: View {
     }
 
     private func syncCurrentModelSelection() {
-        if let matchingModel = DownloadedModel.resolveStoredReference(session.modelId, in: downloadedModels) {
+        if let matchingModel = BuiltInModelCatalog.resolveStoredReference(session.modelId, in: downloadedModels) {
             if viewModel.currentModel?.id != matchingModel.id {
                 viewModel.currentModel = matchingModel
             }
@@ -400,6 +400,14 @@ struct ModelSelectorSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Query(filter: #Predicate<DownloadedModel> { $0.isDownloaded == true }) private var models: [DownloadedModel]
     @Binding var selectedModel: DownloadedModel?
+
+    private var availableModels: [DownloadedModel] {
+        BuiltInModelCatalog.selectionModels(downloadedModels: models)
+    }
+
+    private var appleAvailability: BuiltInModelAvailability {
+        BuiltInModelCatalog.availability()
+    }
     
     var body: some View {
         NavigationStack {
@@ -407,7 +415,7 @@ struct ModelSelectorSheet: View {
                 AnimatedMeshBackground()
                 
                 List {
-                    ForEach(models) { model in
+                    ForEach(availableModels) { model in
                         Button {
                             selectedModel = model
                             dismiss()
@@ -418,13 +426,23 @@ struct ModelSelectorSheet: View {
                                         .font(.system(size: 16, weight: .medium))
                                     
                                     HStack(spacing: 8) {
-                                        Label(model.quantization, systemImage: "cpu")
-                                            .font(.system(size: 12))
-                                        
-                                        Text("•")
-                                        
-                                        Label(model.formattedSize, systemImage: "externaldrive")
-                                            .font(.system(size: 12))
+                                        if model.isBuiltInAppleModel {
+                                            Label("Built In", systemImage: "apple.logo")
+                                                .font(.system(size: 12))
+
+                                            Text("•")
+
+                                            Label(appleAvailability.isAvailable ? "On Device" : "Unavailable", systemImage: appleAvailability.isAvailable ? "bolt.fill" : "exclamationmark.triangle.fill")
+                                                .font(.system(size: 12))
+                                        } else {
+                                            Label(model.quantization, systemImage: "cpu")
+                                                .font(.system(size: 12))
+                                            
+                                            Text("•")
+                                            
+                                            Label(model.formattedSize, systemImage: "externaldrive")
+                                                .font(.system(size: 12))
+                                        }
                                     }
                                     .foregroundStyle(.secondary)
                                 }
@@ -443,6 +461,7 @@ struct ModelSelectorSheet: View {
                                 .fill(.ultraThinMaterial)
                         )
                         .listRowSeparator(.hidden)
+                        .disabled(model.isBuiltInAppleModel && !appleAvailability.isAvailable)
                     }
                 }
                 .listStyle(.plain)
@@ -505,37 +524,45 @@ class ChatViewModel: ObservableObject {
 
         var parameters = ModelParameters.default
         parameters.stopSequences = PromptComposer.defaultChatStopSequences
+        let guardedSystemPrompt = PromptComposer.guardedSystemPrompt(session.systemPrompt)
         
         do {
-            // Validate model path before loading
-            guard !model.localPath.isEmpty else {
-                throw ModelError.invalidPath
-            }
-            
-            // Check if file exists at the stored path
-            guard FileManager.default.fileExists(atPath: model.localPath) else {
-                throw ModelError.modelNotFound
-            }
-            
-            try await ModelRunner.shared.loadModel(
-                from: model.localPath,
-                contextLength: model.runtimeContextLength,
-                gpuLayers: AppSettings.shared.gpuLayers
-            )
-            
-            var generatedText = ""
-            let shouldStreamInUI = AppSettings.shared.streamingEnabled
-            
-            let result = try await ModelRunner.shared.generate(
-                prompt: conversationPrompt,
-                systemPrompt: PromptComposer.guardedSystemPrompt(session.systemPrompt),
-                parameters: parameters
-            ) { token in
-                guard shouldStreamInUI else { return }
-                generatedText += token
-                Task { @MainActor in
-                    assistantMessage.content = generatedText
-                    self.streamRevision += 1
+            let result: GenerationResult
+
+            if model.isBuiltInAppleModel {
+                result = try await AppleFoundationModelService.shared.generate(
+                    prompt: conversationPrompt,
+                    systemPrompt: guardedSystemPrompt
+                )
+            } else {
+                guard !model.localPath.isEmpty else {
+                    throw ModelError.invalidPath
+                }
+
+                guard FileManager.default.fileExists(atPath: model.localPath) else {
+                    throw ModelError.modelNotFound
+                }
+
+                try await ModelRunner.shared.loadModel(
+                    from: model.localPath,
+                    contextLength: model.runtimeContextLength,
+                    gpuLayers: AppSettings.shared.gpuLayers
+                )
+
+                var generatedText = ""
+                let shouldStreamInUI = AppSettings.shared.streamingEnabled
+
+                result = try await ModelRunner.shared.generate(
+                    prompt: conversationPrompt,
+                    systemPrompt: guardedSystemPrompt,
+                    parameters: parameters
+                ) { token in
+                    guard shouldStreamInUI else { return }
+                    generatedText += token
+                    Task { @MainActor in
+                        assistantMessage.content = generatedText
+                        self.streamRevision += 1
+                    }
                 }
             }
             
@@ -556,6 +583,18 @@ class ChatViewModel: ObservableObject {
             }
             
         } catch {
+            if isGenerationCancelled(error) {
+                assistantMessage.isGenerating = false
+                if assistantMessage.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    context.delete(assistantMessage)
+                }
+                try? context.save()
+                Task { @MainActor in
+                    HapticManager.impact(.medium)
+                }
+                return
+            }
+
             errorMessage = error.localizedDescription
             assistantMessage.content = "Error: \(error.localizedDescription)"
             assistantMessage.isGenerating = false
@@ -568,9 +607,24 @@ class ChatViewModel: ObservableObject {
     
     func stopGeneration() {
         ModelRunner.shared.stopGeneration()
+        Task {
+            await AppleFoundationModelService.shared.stopGeneration()
+        }
         Task { @MainActor in
             HapticManager.impact(.medium)
         }
+    }
+
+    private func isGenerationCancelled(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+
+        if let modelError = error as? ModelError, case .generationCancelled = modelError {
+            return true
+        }
+
+        return false
     }
 }
 

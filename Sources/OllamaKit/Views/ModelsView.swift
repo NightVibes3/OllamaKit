@@ -37,6 +37,8 @@ struct ModelsView: View {
                         }
                     }
 
+                    BuiltInAppleModelCard()
+
                     SurfaceSectionCard(
                         title: "Downloaded Models",
                         footer: downloadedModels.isEmpty
@@ -423,6 +425,86 @@ struct EmptyModelsView: View {
         }
         .frame(maxWidth: .infinity, minHeight: 180)
         .padding(.vertical, 18)
+    }
+}
+
+struct BuiltInAppleModelCard: View {
+    @ObservedObject private var settings = AppSettings.shared
+
+    private var model: DownloadedModel {
+        BuiltInModelCatalog.appleOnDeviceModel()
+    }
+
+    private var availability: BuiltInModelAvailability {
+        BuiltInModelCatalog.availability()
+    }
+
+    private var isDefault: Bool {
+        model.matchesStoredReference(settings.defaultModelId)
+    }
+
+    var body: some View {
+        SurfaceSectionCard(
+            title: "Apple On-Device AI",
+            footer: availability.detail
+        ) {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .top, spacing: 12) {
+                    ZStack {
+                        Circle()
+                            .fill(availability.tint.opacity(0.16))
+                            .frame(width: 46, height: 46)
+
+                        Image(systemName: "apple.logo")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(availability.tint)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(model.displayName)
+                            .font(.system(size: 18, weight: .semibold))
+
+                        Text("Built into iOS through Apple's Foundation Models framework")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    Text(availability.title)
+                        .font(.system(size: 11, weight: .semibold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(availability.tint.opacity(0.18))
+                        )
+                        .foregroundStyle(availability.tint)
+                }
+
+                HStack(spacing: 10) {
+                    ModelFactChip(icon: "apple.logo", text: "Built In")
+                    ModelFactChip(icon: "bolt.fill", text: "On Device")
+                    ModelFactChip(icon: "sparkles", text: "Apple AI")
+                }
+
+                HStack(spacing: 12) {
+                    Button(isDefault ? "Default for New Chats" : "Set as Default") {
+                        AppSettings.shared.defaultModelId = model.persistentReference
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!availability.isAvailable || isDefault)
+
+                    if isDefault {
+                        Button("Clear Default") {
+                            AppSettings.shared.defaultModelId = ""
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+            }
+            .padding(.vertical, 16)
+        }
     }
 }
 
@@ -1556,9 +1638,11 @@ enum DeviceCapabilityInspector {
     private static func machineIdentifier() -> String {
         var systemInfo = utsname()
         uname(&systemInfo)
+        var machine = systemInfo.machine
+        let capacity = MemoryLayout.size(ofValue: machine)
 
-        return withUnsafePointer(to: &systemInfo.machine) { pointer in
-            pointer.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: systemInfo.machine)) { charPointer in
+        return withUnsafePointer(to: &machine) { pointer in
+            pointer.withMemoryRebound(to: CChar.self, capacity: capacity) { charPointer in
                 String(cString: charPointer)
             }
         }

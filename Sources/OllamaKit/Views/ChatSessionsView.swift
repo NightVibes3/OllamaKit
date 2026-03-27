@@ -170,6 +170,14 @@ struct NewChatSheet: View {
     @State private var selectedModel: DownloadedModel?
     @State private var systemPrompt = ""
     @State private var showingCustomPrompt = false
+
+    private var availableModels: [DownloadedModel] {
+        BuiltInModelCatalog.selectionModels(downloadedModels: models)
+    }
+
+    private var appleAvailability: BuiltInModelAvailability {
+        BuiltInModelCatalog.availability()
+    }
     
     let defaultPrompts = [
         ("Default Assistant", "You are a helpful assistant."),
@@ -186,7 +194,7 @@ struct NewChatSheet: View {
                 
                 List {
                     Section {
-                        if models.isEmpty {
+                        if availableModels.isEmpty {
                             VStack(spacing: 12) {
                                 Image(systemName: "cube.box")
                                     .font(.system(size: 40))
@@ -204,13 +212,15 @@ struct NewChatSheet: View {
                             .padding(.vertical, 40)
                             .listRowBackground(Color.clear)
                         } else {
-                            ForEach(models) { model in
+                            ForEach(availableModels) { model in
                                 ModelSelectionRow(
                                     model: model,
                                     isSelected: selectedModel?.id == model.id
                                 )
                                 .contentShape(Rectangle())
+                                .opacity(model.isBuiltInAppleModel && !appleAvailability.isAvailable ? 0.55 : 1)
                                 .onTapGesture {
+                                    guard !model.isBuiltInAppleModel || appleAvailability.isAvailable else { return }
                                     selectedModel = model
                                     Task { @MainActor in
                                         HapticManager.selectionChanged()
@@ -287,7 +297,7 @@ struct NewChatSheet: View {
         }
         .onAppear {
             if selectedModel == nil, !AppSettings.shared.defaultModelId.isEmpty {
-                selectedModel = DownloadedModel.resolveStoredReference(AppSettings.shared.defaultModelId, in: models)
+                selectedModel = BuiltInModelCatalog.resolveStoredReference(AppSettings.shared.defaultModelId, in: models)
             }
             if systemPrompt.isEmpty {
                 systemPrompt = "You are a helpful assistant."
@@ -317,6 +327,10 @@ struct NewChatSheet: View {
 struct ModelSelectionRow: View {
     let model: DownloadedModel
     let isSelected: Bool
+
+    private var appleAvailability: BuiltInModelAvailability {
+        BuiltInModelCatalog.availability()
+    }
     
     var body: some View {
         HStack {
@@ -325,16 +339,29 @@ struct ModelSelectionRow: View {
                     .font(.system(size: 16, weight: .medium))
                 
                 HStack(spacing: 8) {
-                    Label(model.quantization, systemImage: "cpu")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                    
-                    Text("•")
-                        .foregroundStyle(.tertiary)
-                    
-                    Label(model.formattedSize, systemImage: "externaldrive")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
+                    if model.isBuiltInAppleModel {
+                        Label("Built In", systemImage: "apple.logo")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+
+                        Text("•")
+                            .foregroundStyle(.tertiary)
+
+                        Label(appleAvailability.isAvailable ? "On Device" : "Unavailable", systemImage: appleAvailability.isAvailable ? "bolt.fill" : "exclamationmark.triangle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Label(model.quantization, systemImage: "cpu")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        
+                        Text("•")
+                            .foregroundStyle(.tertiary)
+                        
+                        Label(model.formattedSize, systemImage: "externaldrive")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             
