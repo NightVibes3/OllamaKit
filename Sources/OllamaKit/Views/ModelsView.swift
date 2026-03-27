@@ -152,17 +152,17 @@ private extension ModelSnapshot {
     }
 
     var isRunnableInCurrentBuild: Bool {
-        backendKind != .coreMLPackage
+        backendKind != .coreMLPackage || hasRunnableCoreMLPayload
     }
 
     var runtimeAvailabilityLabel: String? {
-        guard backendKind == .coreMLPackage else { return nil }
-        return "Imported Only"
+        guard backendKind == .coreMLPackage, !hasRunnableCoreMLPayload else { return nil }
+        return "Incomplete Import"
     }
 
     var runtimeAvailabilityMessage: String? {
-        guard backendKind == .coreMLPackage else { return nil }
-        return "This CoreML package is imported and managed by the app, but this build cannot execute CoreML chat models yet."
+        guard backendKind == .coreMLPackage, !hasRunnableCoreMLPayload else { return nil }
+        return "Import the full ANEMLL/CoreML model folder containing meta.yaml, tokenizer assets, and compiled .mlmodelc or .mlpackage payloads."
     }
 }
 
@@ -1077,7 +1077,11 @@ class ModelsViewModel: ObservableObject {
 
             alertTitle = "Model Imported"
             if importedModel.backendKind == .coreMLPackage {
-                errorMessage = "\(importedModel.displayName) was imported successfully. This build can manage CoreML packages, but it cannot run them for chat yet."
+                if importedModel.hasRunnableCoreMLPayload {
+                    errorMessage = "\(importedModel.displayName) is ready to load as a CoreML chat model."
+                } else {
+                    errorMessage = "\(importedModel.displayName) was imported, but it is missing runnable ANEMLL/CoreML metadata. Import the full model folder, not only a compiled bundle."
+                }
             } else {
                 errorMessage = "\(importedModel.displayName) is ready to use."
             }

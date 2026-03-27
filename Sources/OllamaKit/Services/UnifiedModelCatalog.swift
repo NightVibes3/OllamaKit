@@ -102,6 +102,10 @@ struct ModelSnapshot: Identifiable, Hashable, Sendable {
         backendKind == .appleFoundation
     }
 
+    var hasRunnableCoreMLPayload: Bool {
+        backendKind == .coreMLPackage && CoreMLPackageLocator.looksRunnable(packageRootPath: packageRootPath)
+    }
+
     func matchesStoredReference(_ candidate: String) -> Bool {
         matchPriority(forStoredReference: candidate) != nil
     }

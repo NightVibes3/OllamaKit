@@ -203,7 +203,7 @@ struct NewChatSheet: View {
                                 Text("No Runnable Models")
                                     .font(.headline)
                                 
-                                Text("Download a GGUF model or use Apple On-Device AI if it is available on this device. Imported CoreML packages are managed in Models, but they cannot chat in this build yet.")
+                                Text("Download a GGUF model, import a full ANEMLL/CoreML model package, or use Apple On-Device AI if it is available on this device.")
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
                                     .multilineTextAlignment(.center)

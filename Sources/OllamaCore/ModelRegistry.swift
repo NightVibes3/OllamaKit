@@ -316,8 +316,8 @@ public actor ModelRegistryStore {
                 quantization: "CoreML",
                 parameterCountLabel: "Package",
                 contextLength: defaultContextLength,
-                supportsStreaming: false,
-                notes: "Imported ANEMLL-style CoreML package."
+                supportsStreaming: true,
+                notes: "Imported ANEMLL/CoreML package."
             )
         )
 

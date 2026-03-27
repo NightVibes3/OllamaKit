@@ -425,6 +425,88 @@ public enum InferenceError: Error, LocalizedError, Sendable {
     }
 }
 
+public enum CoreMLPackageLocator {
+    public static func looksRunnable(packageRootPath: String?) -> Bool {
+        guard let packageRootPath?.nonEmpty else { return false }
+        return runtimeModelRootURL(packageRootURL: URL(fileURLWithPath: packageRootPath)) != nil
+    }
+
+    public static func runtimeModelRootURL(packageRootURL: URL) -> URL? {
+        if hasRunnablePayload(at: packageRootURL) {
+            return packageRootURL
+        }
+
+        guard let enumerator = FileManager.default.enumerator(
+            at: packageRootURL,
+            includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+
+        var candidateRoots: [URL] = []
+
+        for case let fileURL as URL in enumerator {
+            guard fileURL.lastPathComponent.localizedCaseInsensitiveCompare("meta.yaml") == .orderedSame else {
+                continue
+            }
+
+            let candidateRoot = fileURL.deletingLastPathComponent()
+            if hasRunnablePayload(at: candidateRoot) {
+                candidateRoots.append(candidateRoot)
+            }
+        }
+
+        return candidateRoots.min { lhs, rhs in
+            if lhs.pathComponents.count != rhs.pathComponents.count {
+                return lhs.pathComponents.count < rhs.pathComponents.count
+            }
+
+            return lhs.path.localizedCaseInsensitiveCompare(rhs.path) == .orderedAscending
+        }
+    }
+
+    private static func hasRunnablePayload(at candidateRoot: URL) -> Bool {
+        let fileManager = FileManager.default
+        let metaURL = candidateRoot.appendingPathComponent("meta.yaml")
+
+        guard fileManager.fileExists(atPath: metaURL.path) else {
+            return false
+        }
+
+        let tokenizerFilenames = [
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "tokenizer.model",
+        ]
+
+        let hasTokenizerAssets = tokenizerFilenames.contains { filename in
+            fileManager.fileExists(atPath: candidateRoot.appendingPathComponent(filename).path)
+        }
+
+        guard hasTokenizerAssets else {
+            return false
+        }
+
+        guard let payloadEnumerator = fileManager.enumerator(
+            at: candidateRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return false
+        }
+
+        for case let fileURL as URL in payloadEnumerator {
+            let ext = fileURL.pathExtension.lowercased()
+            if ext == "mlmodelc" || ext == "mlpackage" {
+                return true
+            }
+        }
+
+        return false
+    }
+}
+
 public struct DeviceProfile: Hashable, Sendable {
     public let machineIdentifier: String
     public let chipFamily: String

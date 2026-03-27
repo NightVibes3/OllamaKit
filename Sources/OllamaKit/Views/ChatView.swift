@@ -426,7 +426,7 @@ struct ModelSelectorSheet: View {
                                 Text("No Runnable Models")
                                     .font(.headline)
 
-                                Text("Download a GGUF model or use Apple On-Device AI if available. Imported CoreML packages stay in the Models tab until this build includes a CoreML chat runtime.")
+                                Text("Download a GGUF model, import a full ANEMLL/CoreML model package, or use Apple On-Device AI if available.")
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
                                     .multilineTextAlignment(.center)

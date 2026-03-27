@@ -186,22 +186,34 @@ public actor DeviceCapabilityService {
             )
         }
 
-        let hasRecognizedPayload = packageContainsRecognizedPayload(packageRootURL)
-        guard hasRecognizedPayload else {
+        guard let runtimeRootURL = CoreMLPackageLocator.runtimeModelRootURL(packageRootURL: packageRootURL) else {
             return CompatibilityReport(
                 backendKind: .coreMLPackage,
                 level: .unavailable,
                 title: "Unavailable",
-                message: "The imported package does not contain a recognized CoreML model payload."
+                message: "Import the full ANEMLL/CoreML model folder containing meta.yaml, tokenizer assets, and compiled .mlmodelc or .mlpackage payloads."
             )
         }
 
+        #if !canImport(AnemllCore)
         return CompatibilityReport(
             backendKind: .coreMLPackage,
             level: .unavailable,
-            title: "Imported Only",
-            message: "This CoreML package is structurally valid and can be managed by the app, but this build does not include a CoreML text-generation runtime yet."
+            title: "Unavailable",
+            message: "This build does not include the ANEMLL CoreML runtime."
         )
+        #else
+        let relativeRoot = runtimeRootURL.path.replacingOccurrences(of: packageRootURL.path, with: "")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+
+        let detail = relativeRoot.isEmpty ? entry.displayName : relativeRoot
+        return CompatibilityReport(
+            backendKind: .coreMLPackage,
+            level: .supported,
+            title: "Supported",
+            message: "This imported CoreML package includes a runnable ANEMLL payload (\(detail))."
+        )
+        #endif
     }
 
     private func machineIdentifier() -> String {
@@ -279,24 +291,5 @@ public actor DeviceCapabilityService {
         }
 
         return current.minorVersion >= requiredMinor
-    }
-
-    private func packageContainsRecognizedPayload(_ packageRootURL: URL) -> Bool {
-        guard let enumerator = FileManager.default.enumerator(
-            at: packageRootURL,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            return false
-        }
-
-        for case let fileURL as URL in enumerator {
-            let pathExtension = fileURL.pathExtension.lowercased()
-            if pathExtension == "mlmodelc" || pathExtension == "mlpackage" {
-                return true
-            }
-        }
-
-        return false
     }
 }

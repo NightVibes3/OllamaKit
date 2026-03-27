@@ -218,7 +218,7 @@ enum BuiltInModelCatalog {
             case .appleFoundation:
                 return appleIsAvailable
             case .coreMLPackage:
-                return false
+                return model.hasRunnableCoreMLPayload
             }
         }
     }

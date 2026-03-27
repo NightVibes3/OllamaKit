@@ -36,6 +36,7 @@
 		000000010000000000000021 /* llama.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 000000010000000000000110 /* llama.xcframework */; };
 		000000010000000000000022 /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 000000010000000000000111 /* Accelerate.framework */; };
 		000000010000000000000023 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 000000010000000000000112 /* Metal.framework */; };
+		000000010000000000000024 /* AnemllCore in Frameworks */ = {isa = PBXBuildFile; productRef = 000000010000000000000A01 /* AnemllCore */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -98,6 +99,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				000000010000000000000024 /* AnemllCore in Frameworks */,
 				000000010000000000000023 /* Metal.framework in Frameworks */,
 				000000010000000000000022 /* Accelerate.framework in Frameworks */,
 				000000010000000000000021 /* llama.xcframework in Frameworks */,
@@ -230,6 +232,9 @@
 			dependencies = (
 			);
 			name = OllamaCore;
+			packageProductDependencies = (
+				000000010000000000000A01 /* AnemllCore */,
+			);
 			productName = OllamaCore;
 			productReference = 000000010000000000000115 /* OllamaCore.framework */;
 			productType = "com.apple.product-type.framework";
@@ -261,6 +266,9 @@
 				Base,
 			);
 			mainGroup = 000000010000000000000300;
+			packageReferences = (
+				000000010000000000000A00 /* XCLocalSwiftPackageReference "Vendor/anemll-swift-cli" */,
+			);
 			productRefGroup = 000000010000000000000302 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -325,6 +333,21 @@
 			targetProxy = 000000010000000000000900 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		000000010000000000000A00 /* XCLocalSwiftPackageReference "Vendor/anemll-swift-cli" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Vendor/anemll-swift-cli;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		000000010000000000000A01 /* AnemllCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 000000010000000000000A00 /* XCLocalSwiftPackageReference "Vendor/anemll-swift-cli" */;
+			productName = AnemllCore;
+		};
+/* End XCSwiftPackageProductDependency section */
 
 /* Begin XCBuildConfiguration section */
 		000000010000000000000800 /* Debug */ = {
