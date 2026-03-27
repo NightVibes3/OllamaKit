@@ -7,7 +7,6 @@ struct ChatSessionsView: View {
     
     @State private var showingNewChat = false
     @State private var searchText = ""
-    @State private var selectedSession: ChatSession?
     
     var filteredSessions: [ChatSession] {
         if searchText.isEmpty {
@@ -15,7 +14,7 @@ struct ChatSessionsView: View {
         }
         return sessions.filter { session in
             session.title.localizedCaseInsensitiveContains(searchText) ||
-            (session.messages?.contains { $0.content.localizedCaseInsensitiveContains(searchText) } ?? false)
+            session.orderedMessages.contains { $0.content.localizedCaseInsensitiveContains(searchText) }
         }
     }
     
@@ -71,8 +70,11 @@ struct ChatSessionsView: View {
     }
     
     private func deleteSessions(at offsets: IndexSet) {
-        for index in offsets {
-            let session = filteredSessions[index]
+        let sessionsToDelete = offsets.compactMap { index in
+            filteredSessions.indices.contains(index) ? filteredSessions[index] : nil
+        }
+
+        for session in sessionsToDelete {
             modelContext.delete(session)
         }
         try? modelContext.save()
@@ -80,16 +82,20 @@ struct ChatSessionsView: View {
 }
 
 struct ChatSessionRow: View {
+    private static let relativeTimeFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter
+    }()
+
     let session: ChatSession
     
     var lastMessage: String {
-        session.messages?.last?.content ?? "No messages yet"
+        session.orderedMessages.last?.content ?? "No messages yet"
     }
     
     var lastMessageTime: String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
-        return formatter.localizedString(for: session.updatedAt, relativeTo: Date())
+        Self.relativeTimeFormatter.localizedString(for: session.updatedAt, relativeTo: Date())
     }
     
     var body: some View {
@@ -206,6 +212,9 @@ struct NewChatSheet: View {
                                 .contentShape(Rectangle())
                                 .onTapGesture {
                                     selectedModel = model
+                                    Task { @MainActor in
+                                        HapticManager.selectionChanged()
+                                    }
                                 }
                             }
                         }
@@ -233,6 +242,9 @@ struct NewChatSheet: View {
                                 } else {
                                     showingCustomPrompt = false
                                     systemPrompt = prompt.1
+                                }
+                                Task { @MainActor in
+                                    HapticManager.selectionChanged()
                                 }
                             }
                         }
@@ -273,6 +285,14 @@ struct NewChatSheet: View {
                 }
             }
         }
+        .onAppear {
+            if selectedModel == nil, !AppSettings.shared.defaultModelId.isEmpty {
+                selectedModel = DownloadedModel.resolveStoredReference(AppSettings.shared.defaultModelId, in: models)
+            }
+            if systemPrompt.isEmpty {
+                systemPrompt = "You are a helpful assistant."
+            }
+        }
     }
     
     private func createChat() {
@@ -280,12 +300,15 @@ struct NewChatSheet: View {
         
         let session = ChatSession(
             title: "Chat with \(model.displayName)",
-            modelId: model.modelId,
+            modelId: model.persistentReference,
             systemPrompt: systemPrompt.isEmpty ? "You are a helpful assistant." : systemPrompt
         )
         
         modelContext.insert(session)
         try? modelContext.save()
+        Task { @MainActor in
+            HapticManager.notification(.success)
+        }
         
         dismiss()
     }
@@ -319,7 +342,7 @@ struct ModelSelectionRow: View {
             
             if isSelected {
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.accent)
+                    .foregroundStyle(Color.accentColor)
                     .font(.system(size: 22))
             }
         }
@@ -350,7 +373,7 @@ struct PromptRow: View {
             
             if isSelected {
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.accent)
+                    .foregroundStyle(Color.accentColor)
                     .font(.system(size: 22))
             }
         }

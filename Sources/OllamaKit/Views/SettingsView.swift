@@ -1,9 +1,8 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @StateObject private var settings = AppSettings.shared
+    @ObservedObject private var settings = AppSettings.shared
     @State private var showingResetConfirmation = false
-    @State private var showingClearDataConfirmation = false
     
     var body: some View {
         ZStack {
@@ -123,7 +122,15 @@ struct SettingsView: View {
         .alert("Reset Settings?", isPresented: $showingResetConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Reset", role: .destructive) {
-                settings.resetToDefaults()
+                Task {
+                    await ServerManager.shared.stopServer()
+                    BackgroundTaskManager.shared.cancelScheduledBackgroundTask()
+                    ModelRunner.shared.unloadModel()
+                    await MainActor.run {
+                        settings.resetToDefaults()
+                        HapticManager.notification(.success)
+                    }
+                }
             }
         } message: {
             Text("This will reset all settings to their default values. Your downloaded models and chats will not be affected.")
@@ -324,7 +331,7 @@ struct MemorySettingsSection: View {
                         } label: {
                             Image(systemName: "minus.circle.fill")
                                 .font(.system(size: 22))
-                                .foregroundStyle(.accent)
+                                .foregroundStyle(Color.accentColor)
                         }
                         
                         Text("\(settings.autoOffloadMinutes)m")
@@ -338,7 +345,7 @@ struct MemorySettingsSection: View {
                         } label: {
                             Image(systemName: "plus.circle.fill")
                                 .font(.system(size: 22))
-                                .foregroundStyle(.accent)
+                                .foregroundStyle(Color.accentColor)
                         }
                     }
                 }
@@ -435,7 +442,7 @@ struct HuggingFaceTokenEditView: View {
                         Text("Get Token")
                         Spacer()
                         Image(systemName: "arrow.up.right.square")
-                            .foregroundStyle(.accent)
+                            .foregroundStyle(Color.accentColor)
                     }
                 }
             }
@@ -530,6 +537,10 @@ struct InterfaceSettingsSection: View {
 }
 
 struct DataManagementSection: View {
+    @Environment(\.modelContext) private var modelContext
+    @Query private var chatSessions: [ChatSession]
+    @Query private var downloadedModels: [DownloadedModel]
+
     @State private var showingClearChatsConfirmation = false
     @State private var showingClearModelsConfirmation = false
     
@@ -583,7 +594,10 @@ struct DataManagementSection: View {
         .alert("Clear All Chats?", isPresented: $showingClearChatsConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Clear", role: .destructive) {
-                // Clear chats
+                for session in chatSessions {
+                    modelContext.delete(session)
+                }
+                try? modelContext.save()
             }
         } message: {
             Text("This will permanently delete all your chat history. This action cannot be undone.")
@@ -591,7 +605,21 @@ struct DataManagementSection: View {
         .alert("Delete All Models?", isPresented: $showingClearModelsConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Delete", role: .destructive) {
-                // Delete models
+                Task { @MainActor in
+                    await ServerManager.shared.stopServer()
+                    BackgroundTaskManager.shared.cancelScheduledBackgroundTask()
+                    ModelRunner.shared.unloadModel()
+
+                    for model in downloadedModels {
+                        if !model.localPath.isEmpty {
+                            try? FileManager.default.removeItem(atPath: model.localPath)
+                        }
+                        modelContext.delete(model)
+                    }
+                    try? modelContext.save()
+                    AppSettings.shared.defaultModelId = ""
+                    HapticManager.notification(.warning)
+                }
             }
         } message: {
             Text("This will permanently delete all downloaded models. You'll need to re-download them to use them again.")
@@ -617,7 +645,7 @@ struct AboutSection: View {
                             )
                             .frame(width: 100, height: 100)
                         
-                        Image(systemName: "cube.transparent")
+                        Image(systemName: "cube.box.fill")
                             .font(.system(size: 50))
                             .foregroundStyle(.white)
                     }
@@ -635,14 +663,14 @@ struct AboutSection: View {
                 Spacer()
             }
             
-            Text("Run local LLMs on your iOS device with an OpenAI-compatible API server.")
+            Text("Manage local GGUF models, chat sessions, and a local API server. On-device inference is powered by a linked llama.cpp runtime in the app build.")
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             
             HStack(spacing: 20) {
                 Link(destination: URL(string: "https://github.com")!) {
-                    Image(systemName: "logo.github")
+                    Image(systemName: "link")
                         .font(.system(size: 24))
                 }
                 
@@ -651,7 +679,7 @@ struct AboutSection: View {
                         .font(.system(size: 24))
                 }
             }
-            .foregroundStyle(.accent)
+            .foregroundStyle(Color.accentColor)
         }
         .padding(20)
     }
@@ -690,7 +718,7 @@ struct ParameterSlider: View {
             }
             
             Slider(value: $value, in: range, step: step)
-                .tint(.accent)
+                .tint(Color.accentColor)
         }
         .padding(.vertical, 12)
     }
@@ -723,7 +751,7 @@ struct ParameterStepper: View {
                 } label: {
                     Image(systemName: "minus.circle.fill")
                         .font(.system(size: 24))
-                        .foregroundStyle(.accent)
+                        .foregroundStyle(Color.accentColor)
                 }
                 .disabled(value <= range.lowerBound)
                 
@@ -738,7 +766,7 @@ struct ParameterStepper: View {
                 } label: {
                     Image(systemName: "plus.circle.fill")
                         .font(.system(size: 24))
-                        .foregroundStyle(.accent)
+                        .foregroundStyle(Color.accentColor)
                 }
                 .disabled(value >= range.upperBound)
             }

@@ -2,17 +2,21 @@
 
 A powerful iOS app for running local Large Language Models (LLMs) with an OpenAI-compatible API server. Built with iOS 26 Liquid Glass design principles.
 
-![Platform](https://img.shields.io/badge/platform-iOS%2017.0+-blue.svg)
+> [!IMPORTANT]
+> The app now expects a linked `llama.cpp` XCFramework for real on-device GGUF inference.
+> GitHub Actions builds that runtime automatically from the pinned upstream `llama.cpp` tag before archiving the unsigned IPA.
+
+![Platform](https://img.shields.io/badge/platform-iOS%2026.0+-blue.svg)
 ![Swift](https://img.shields.io/badge/swift-5.9-orange.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
 ## Features
 
 ### Core Functionality
-- **Local LLM Inference** - Run GGUF format models directly on your device using llama.cpp
+- **Local LLM Inference** - Run GGUF models on-device through a linked `llama.cpp` runtime with streaming token output
 - **Hugging Face Integration** - Browse and download models from Hugging Face Hub
-- **OpenAI-Compatible API** - Use existing OpenAI clients with your local models
-- **Background Server** - Keep the API running even when the app is in background
+- **OpenAI-Compatible API Surface** - Use `/v1/models`, `/v1/completions`, and `/v1/chat/completions` with existing OpenAI clients
+- **Background Server Wakeups** - Best-effort background task restarts within iOS limits
 - **Chat Interface** - Beautiful chat UI with markdown rendering and streaming responses
 
 ### Model Support
@@ -27,7 +31,7 @@ A powerful iOS app for running local Large Language Models (LLMs) with an OpenAI
 - Optional API key authentication
 - External network access support
 - Background task management
-- Full Ollama API compatibility
+- Ollama-style `/api/*` routes for model listing, generate, chat, pull, delete, and running-model status
 
 ### iOS 26 Liquid Glass Design
 - Animated mesh gradient backgrounds
@@ -44,7 +48,7 @@ A powerful iOS app for running local Large Language Models (LLMs) with an OpenAI
 
 ## Requirements
 
-- iOS 17.0 or later
+- iOS 26.0 or later
 - iPhone or iPad with A12 chip or newer (for best performance)
 - At least 4GB RAM (8GB+ recommended for larger models)
 - Free storage space for models (2-8GB per model)
@@ -85,8 +89,9 @@ A powerful iOS app for running local Large Language Models (LLMs) with an OpenAI
 ### Prerequisites
 
 - macOS 15.0 or later
-- Xcode 16.0 or later
-- iOS 17.0+ SDK
+- Xcode 26.0 or later
+- iOS 26.0+ SDK
+- CMake 3.28.0 or later
 - Active Apple Developer account (for device testing)
 
 ### Clone and Build
@@ -95,6 +100,10 @@ A powerful iOS app for running local Large Language Models (LLMs) with an OpenAI
 # Clone the repository
 git clone https://github.com/yourusername/OllamaKit.git
 cd OllamaKit
+
+# Build the llama.cpp iOS XCFramework
+git clone --depth 1 --branch b8548 https://github.com/ggml-org/llama.cpp.git .deps/llama.cpp
+bash Scripts/build-llama-ios-xcframework.sh ./.deps/llama.cpp ./Vendor/llama.xcframework
 
 # Open in Xcode
 open OllamaKit.xcodeproj
@@ -106,6 +115,10 @@ xcodebuild -project OllamaKit.xcodeproj -scheme OllamaKit -configuration Release
 ### Build Unsigned IPA
 
 ```bash
+# Build the llama.cpp iOS XCFramework
+git clone --depth 1 --branch b8548 https://github.com/ggml-org/llama.cpp.git .deps/llama.cpp
+bash Scripts/build-llama-ios-xcframework.sh ./.deps/llama.cpp ./Vendor/llama.xcframework
+
 # Build archive
 xcodebuild archive \
   -project OllamaKit.xcodeproj \
@@ -156,7 +169,7 @@ curl http://localhost:11434/api/tags
 curl -X POST http://localhost:11434/api/generate \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "llama2-7b",
+    "model": "MODEL_ID_FROM_/api/tags",
     "prompt": "Why is the sky blue?"
   }'
 
@@ -164,12 +177,14 @@ curl -X POST http://localhost:11434/api/generate \
 curl -X POST http://localhost:11434/api/chat \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "llama2-7b",
+    "model": "MODEL_ID_FROM_/api/tags",
     "messages": [
       {"role": "user", "content": "Hello!"}
     ]
   }'
 ```
+
+When multiple downloaded files come from the same Hugging Face repo, use the exact identifier returned by `/api/tags` or `/v1/models`. The app exposes a composite identifier so API clients can target a specific downloaded quantization/file.
 
 ### Connecting from Other Devices
 
@@ -256,24 +271,24 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
 ## Architecture
 
 ```
-OllamaKit/
-├── OllamaKit/
-│   ├── OllamaKitApp.swift      # App entry point
-│   ├── Views/                   # SwiftUI views
-│   │   ├── ContentView.swift
-│   │   ├── ChatSessionsView.swift
-│   │   ├── ChatView.swift
-│   │   ├── ModelsView.swift
-│   │   ├── ServerView.swift
-│   │   └── SettingsView.swift
-│   ├── Models/                  # Data models
-│   │   ├── DownloadedModel.swift
-│   │   └── AppSettings.swift
-│   └── Services/                # Core services
-│       ├── ModelRunner.swift    # llama.cpp integration
-│       ├── HuggingFaceService.swift
-│       ├── ServerManager.swift  # HTTP API server
-│       └── BackgroundTaskManager.swift
+Sources/OllamaKit/
+├── OllamaKitApp.swift           # App entry point
+├── AppModels.swift              # SwiftData models + app settings
+├── Views/
+│   ├── ContentView.swift
+│   ├── ChatSessionsView.swift
+│   ├── ChatView.swift
+│   ├── ModelsView.swift
+│   ├── ServerView.swift
+│   └── SettingsView.swift
+├── Services/
+│   ├── ModelRunner.swift        # llama.cpp integration
+│   ├── HuggingFaceService.swift
+│   ├── ServerManager.swift      # HTTP API server
+│   └── BackgroundTaskManager.swift
+├── Info.plist
+├── OllamaKit.entitlements
+├── Assets.xcassets/
 └── OllamaKit.xcodeproj/
 ```
 
@@ -284,10 +299,11 @@ OllamaKit/
 | GET | `/api/tags` | List available models |
 | POST | `/api/generate` | Generate completion |
 | POST | `/api/chat` | Chat completion |
-| POST | `/api/embed` | Generate embeddings |
 | POST | `/api/pull` | Download model |
 | DELETE | `/api/delete` | Delete model |
 | GET | `/api/ps` | List running models |
+
+`/api/embed` and `/v1/embeddings` currently return `501 Not Implemented` in this build.
 
 ## Contributing
 

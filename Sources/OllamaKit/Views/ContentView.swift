@@ -2,15 +2,10 @@ import SwiftUI
 import SwiftData
 
 struct ContentView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Query(sort: \ChatSession.updatedAt, order: .reverse) private var chatSessions: [ChatSession]
-    
-    @StateObject private var settings = AppSettings.shared
+    @ObservedObject private var settings = AppSettings.shared
     @State private var selectedTab = 0
-    @State private var showingNewChat = false
-    @State private var showingSettings = false
     
-    var body: some View View {
+    var body: some View {
         TabView(selection: $selectedTab) {
             // Chat Tab
             NavigationStack {
@@ -60,44 +55,75 @@ struct LiquidGlassModifier: ViewModifier {
     var radius: CGFloat = 20
     
     func body(content: Content) -> some View {
-        content
-            .background(
-                ZStack {
-                    // Base blur
-                    RoundedRectangle(cornerRadius: radius)
-                        .fill(.ultraThinMaterial)
-                    
-                    // Liquid distortion effect
-                    RoundedRectangle(cornerRadius: radius)
-                        .fill(
-                            MeshGradient(
-                                width: 3,
-                                height: 3,
-                                points: [
-                                    .init(x: 0, y: 0), .init(x: 0.5, y: 0), .init(x: 1, y: 0),
-                                    .init(x: 0, y: 0.5), .init(x: 0.5, y: 0.5), .init(x: 1, y: 0.5),
-                                    .init(x: 0, y: 1), .init(x: 0.5, y: 1), .init(x: 1, y: 1)
-                                ],
-                                colors: [
-                                    .accentColor.opacity(0.1),
-                                    .accentColor.opacity(0.05),
-                                    .accentColor.opacity(0.1),
-                                    .accentColor.opacity(0.05),
-                                    .accentColor.opacity(0.02),
-                                    .accentColor.opacity(0.05),
-                                    .accentColor.opacity(0.1),
-                                    .accentColor.opacity(0.05),
-                                    .accentColor.opacity(0.1)
-                                ]
+        Group {
+            if #available(iOS 26, *) {
+                content
+                    .background(
+                        RoundedRectangle(cornerRadius: radius)
+                            .fill(
+                                MeshGradient(
+                                    width: 3,
+                                    height: 3,
+                                    points: [
+                                        .init(x: 0, y: 0), .init(x: 0.5, y: 0), .init(x: 1, y: 0),
+                                        .init(x: 0, y: 0.5), .init(x: 0.5, y: 0.5), .init(x: 1, y: 0.5),
+                                        .init(x: 0, y: 1), .init(x: 0.5, y: 1), .init(x: 1, y: 1)
+                                    ],
+                                    colors: [
+                                        .accentColor.opacity(0.1),
+                                        .accentColor.opacity(0.05),
+                                        .accentColor.opacity(0.1),
+                                        .accentColor.opacity(0.05),
+                                        .accentColor.opacity(0.02),
+                                        .accentColor.opacity(0.05),
+                                        .accentColor.opacity(0.1),
+                                        .accentColor.opacity(0.05),
+                                        .accentColor.opacity(0.1)
+                                    ]
+                                )
                             )
-                        )
-                        .opacity(intensity)
-                }
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: radius)
-                    .stroke(.white.opacity(0.1), lineWidth: 0.5)
-            )
+                            .opacity(intensity)
+                    )
+                    .glassEffect(.regular.tint(.accentColor.opacity(intensity)), in: .rect(cornerRadius: radius))
+            } else {
+                content
+                    .background(
+                        ZStack {
+                            RoundedRectangle(cornerRadius: radius)
+                                .fill(.ultraThinMaterial)
+
+                            RoundedRectangle(cornerRadius: radius)
+                                .fill(
+                                    MeshGradient(
+                                        width: 3,
+                                        height: 3,
+                                        points: [
+                                            .init(x: 0, y: 0), .init(x: 0.5, y: 0), .init(x: 1, y: 0),
+                                            .init(x: 0, y: 0.5), .init(x: 0.5, y: 0.5), .init(x: 1, y: 0.5),
+                                            .init(x: 0, y: 1), .init(x: 0.5, y: 1), .init(x: 1, y: 1)
+                                        ],
+                                        colors: [
+                                            .accentColor.opacity(0.1),
+                                            .accentColor.opacity(0.05),
+                                            .accentColor.opacity(0.1),
+                                            .accentColor.opacity(0.05),
+                                            .accentColor.opacity(0.02),
+                                            .accentColor.opacity(0.05),
+                                            .accentColor.opacity(0.1),
+                                            .accentColor.opacity(0.05),
+                                            .accentColor.opacity(0.1)
+                                        ]
+                                    )
+                                )
+                                .opacity(intensity)
+                        }
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: radius)
+                            .stroke(.white.opacity(0.1), lineWidth: 0.5)
+                    )
+            }
+        }
     }
 }
 
@@ -132,10 +158,11 @@ struct GlassCard<Content: View>: View {
 // MARK: - Animated Background
 
 struct AnimatedMeshBackground: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var phase: Double = 0
     
     var body: some View {
-        TimelineView(.animation(minimumInterval: 0.05)) { _ in
+        TimelineView(.animation(minimumInterval: reduceMotion ? 0.25 : 0.1)) { _ in
             MeshGradient(
                 width: 4,
                 height: 4,
@@ -184,7 +211,12 @@ struct AnimatedMeshBackground: View {
             )
         }
         .onAppear {
-            withAnimation(.linear(duration: 20).repeatForever(autoreverses: false)) {
+            guard !reduceMotion else {
+                phase = .pi * 0.5
+                return
+            }
+
+            withAnimation(.linear(duration: 24).repeatForever(autoreverses: false)) {
                 phase = .pi * 2
             }
         }

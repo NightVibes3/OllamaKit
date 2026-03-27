@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import UIKit
 
 @main
 struct OllamaKitApp: App {
@@ -7,18 +8,10 @@ struct OllamaKitApp: App {
     
     let container: ModelContainer
     
+    @MainActor
     init() {
-        do {
-            let schema = Schema([
-                DownloadedModel.self,
-                ChatSession.self,
-                ChatMessage.self
-            ])
-            let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-            container = try ModelContainer(for: schema, configurations: [config])
-        } catch {
-            fatalError("Failed to create ModelContainer: \(error)")
-        }
+        container = Self.makeModelContainer()
+        ModelStorage.shared.configure(container: container)
     }
     
     var body: some Scene {
@@ -27,10 +20,34 @@ struct OllamaKitApp: App {
                 .modelContainer(container)
         }
     }
+
+    @MainActor
+    private static func makeModelContainer() -> ModelContainer {
+        let schema = Schema([
+            DownloadedModel.self,
+            ChatSession.self,
+            ChatMessage.self
+        ])
+
+        do {
+            let persistentConfig = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+            return try ModelContainer(for: schema, configurations: [persistentConfig])
+        } catch {
+            print("Falling back to in-memory SwiftData store after persistent store failure: \(error)")
+        }
+
+        do {
+            let inMemoryConfig = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+            return try ModelContainer(for: schema, configurations: [inMemoryConfig])
+        } catch {
+            fatalError("Failed to create any ModelContainer: \(error)")
+        }
+    }
 }
 
 class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
+        _ = BackgroundTaskManager.shared
         // Start background server if enabled
         Task {
             await ServerManager.shared.startServerIfEnabled()
@@ -39,6 +56,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     }
     
     func applicationDidEnterBackground(_ application: UIApplication) {
+        guard ServerManager.shared.isServerRunning else { return }
         // Keep server running in background
         BackgroundTaskManager.shared.scheduleBackgroundTask()
     }

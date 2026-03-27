@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "OllamaKit",
     platforms: [
-        .iOS(.v17)
+        .iOS("26.0")
     ],
     products: [
         .library(
@@ -12,30 +12,13 @@ let package = Package(
             targets: ["OllamaKit"]
         )
     ],
-    dependencies: [
-        .package(url: "https://github.com/ggerganov/llama.cpp.git", branch: "master"),
-        .package(url: "https://github.com/vapor/vapor.git", from: "4.89.0"),
-        .package(url: "https://github.com/Alamofire/Alamofire.git", from: "5.8.0"),
-        .package(url: "https://github.com/SwiftyJSON/SwiftyJSON.git", from: "5.0.0")
-    ],
     targets: [
         .target(
             name: "OllamaKit",
-            dependencies: [
-                .product(name: "llama", package: "llama.cpp"),
-                .product(name: "Vapor", package: "vapor"),
-                "Alamofire",
-                "SwiftyJSON"
-            ],
             path: "Sources/OllamaKit",
             exclude: [],
             resources: [
-                .process("Assets.xcassets"),
-                .copy("Info.plist"),
-                .copy("OllamaKit.entitlements")
-            ],
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
+                .process("Assets.xcassets")
             ]
         )
     ]

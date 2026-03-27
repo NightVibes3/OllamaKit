@@ -3,14 +3,25 @@ import SwiftData
 
 struct ChatView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
+    @Query(filter: #Predicate<DownloadedModel> { $0.isDownloaded == true }) private var downloadedModels: [DownloadedModel]
     @Bindable var session: ChatSession
     
     @StateObject private var viewModel = ChatViewModel()
     @State private var messageText = ""
     @State private var showingModelSelector = false
-    @State private var scrollToBottom = false
+    @State private var showingRenameDialog = false
+    @State private var pendingTitle = ""
     
     @Namespace private var bottomID
+
+    private var trimmedMessageText: String {
+        messageText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var downloadedModelRevision: [String] {
+        downloadedModels.map { "\($0.id.uuidString)|\($0.modelId)|\($0.localPath)" }
+    }
     
     var body: some View {
         ZStack {
@@ -21,7 +32,7 @@ struct ChatView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(spacing: 16) {
-                            ForEach(session.messages ?? [], id: \.id) { message in
+                            ForEach(session.orderedMessages, id: \.id) { message in
                                 MessageBubble(message: message)
                                     .id(message.id)
                             }
@@ -38,13 +49,18 @@ struct ChatView: View {
                         .padding(.horizontal, 16)
                         .padding(.vertical, 16)
                     }
-                    .onChange(of: session.messages?.count) { _ in
+                    .onChange(of: session.orderedMessages.count) { _ in
                         withAnimation {
                             proxy.scrollTo(bottomID, anchor: .bottom)
                         }
                     }
                     .onChange(of: viewModel.isGenerating) { _ in
                         withAnimation {
+                            proxy.scrollTo(bottomID, anchor: .bottom)
+                        }
+                    }
+                    .onChange(of: viewModel.streamRevision) { _ in
+                        withAnimation(.easeOut(duration: 0.15)) {
                             proxy.scrollTo(bottomID, anchor: .bottom)
                         }
                     }
@@ -71,6 +87,7 @@ struct ChatView: View {
                             )
                         }
                         .buttonStyle(.plain)
+                        .disabled(viewModel.isGenerating)
                         
                         Spacer()
                         
@@ -84,7 +101,7 @@ struct ChatView: View {
                     }
                     .padding(.horizontal, 16)
                     .padding(.top, 8)
-                    
+
                     HStack(spacing: 12) {
                         TextField("Message", text: $messageText, axis: .vertical)
                             .textFieldStyle(.plain)
@@ -102,11 +119,11 @@ struct ChatView: View {
                             )
                         
                         Button(action: sendMessage) {
-                            Image(systemName: messageText.isEmpty ? "waveform" : "arrow.up.circle.fill")
+                            Image(systemName: trimmedMessageText.isEmpty ? "waveform" : "arrow.up.circle.fill")
                                 .font(.system(size: 32))
-                                .foregroundStyle(messageText.isEmpty ? .secondary : .accent)
+                                .foregroundStyle(trimmedMessageText.isEmpty ? Color.secondary : Color.accentColor)
                         }
-                        .disabled(messageText.isEmpty && !viewModel.isGenerating)
+                        .disabled(trimmedMessageText.isEmpty || viewModel.isGenerating)
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
@@ -120,22 +137,25 @@ struct ChatView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button {
-                        // Rename chat
+                        pendingTitle = session.title
+                        showingRenameDialog = true
                     } label: {
                         Label("Rename", systemImage: "pencil")
                     }
                     
                     Button {
-                        // Clear messages
+                        clearMessages()
                     } label: {
                         Label("Clear Messages", systemImage: "trash")
                     }
+                    .disabled(viewModel.isGenerating)
                     
                     Button(role: .destructive) {
-                        // Delete chat
+                        deleteChat()
                     } label: {
-                        Label("Delete Chat", systemImage: "delete.left")
+                        Label("Delete Chat", systemImage: "trash")
                     }
+                    .disabled(viewModel.isGenerating)
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
@@ -145,25 +165,97 @@ struct ChatView: View {
             ModelSelectorSheet(selectedModel: $viewModel.currentModel)
         }
         .task {
-            await viewModel.loadModel(for: session)
+            syncCurrentModelSelection()
         }
+        .onChange(of: downloadedModelRevision) { _ in
+            syncCurrentModelSelection()
+        }
+        .onChange(of: viewModel.currentModel?.id) { _ in
+            if let selectedModel = viewModel.currentModel {
+                session.modelId = selectedModel.persistentReference
+                session.updatedAt = Date()
+                try? modelContext.save()
+            } else if !session.modelId.isEmpty {
+                session.modelId = ""
+                session.updatedAt = Date()
+                try? modelContext.save()
+            }
+        }
+        .alert("Chat Error", isPresented: Binding(
+            get: { viewModel.errorMessage != nil },
+            set: { if !$0 { viewModel.errorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(viewModel.errorMessage ?? "")
+        }
+        .alert("Rename Chat", isPresented: $showingRenameDialog) {
+            TextField("Chat Title", text: $pendingTitle)
+            Button("Save") {
+                let trimmed = pendingTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    session.title = trimmed
+                    session.updatedAt = Date()
+                    try? modelContext.save()
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    private func clearMessages() {
+        for message in session.orderedMessages {
+            modelContext.delete(message)
+        }
+        session.messages = []
+        session.updatedAt = Date()
+        try? modelContext.save()
+        Task { @MainActor in
+            HapticManager.notification(.success)
+        }
+    }
+
+    private func deleteChat() {
+        modelContext.delete(session)
+        try? modelContext.save()
+        Task { @MainActor in
+            HapticManager.notification(.warning)
+        }
+        dismiss()
     }
     
     private func sendMessage() {
-        guard !messageText.isEmpty else { return }
-        
-        let content = messageText
+        let content = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty else { return }
+
         messageText = ""
+
+        Task { @MainActor in
+            HapticManager.impact(.light)
+        }
         
         Task {
             await viewModel.sendMessage(content, in: session, context: modelContext)
+        }
+    }
+
+    private func syncCurrentModelSelection() {
+        if let matchingModel = DownloadedModel.resolveStoredReference(session.modelId, in: downloadedModels) {
+            if viewModel.currentModel?.id != matchingModel.id {
+                viewModel.currentModel = matchingModel
+            }
+            return
+        }
+
+        if viewModel.currentModel != nil {
+            viewModel.currentModel = nil
         }
     }
 }
 
 struct MessageBubble: View {
     let message: ChatMessage
-    @StateObject private var settings = AppSettings.shared
+    @ObservedObject private var settings = AppSettings.shared
     
     var isUser: Bool {
         message.role == .user
@@ -221,13 +313,17 @@ struct MessageBubble: View {
                         .foregroundStyle(isUser ? .white : .primary)
                 }
                 
-                if settings.showTokenCount && message.tokenCount > 0 {
+                if (settings.showTokenCount || settings.showGenerationSpeed) && message.tokenCount > 0 {
                     HStack(spacing: 4) {
-                        Text("\(message.tokenCount) tokens")
-                            .font(.system(size: 10))
-                        
-                        if message.generationTime > 0 {
-                            Text("•")
+                        if settings.showTokenCount {
+                            Text("\(message.tokenCount) tokens")
+                                .font(.system(size: 10))
+                        }
+
+                        if settings.showGenerationSpeed && message.generationTime > 0 {
+                            if settings.showTokenCount {
+                                Text("•")
+                            }
                             Text(String(format: "%.1f t/s", Double(message.tokenCount) / message.generationTime))
                                 .font(.system(size: 10))
                         }
@@ -254,27 +350,16 @@ struct MarkdownText: View {
     }
     
     private var attributedString: AttributedString {
-        // Simple markdown parsing - in production, use a proper markdown parser
-        var result = text
-        
-        // Code blocks
-        result = result.replacingOccurrences(of: "```\\n?([^`]+)\\n?```", with: "$1", options: .regularExpression)
-        
-        // Inline code
-        result = result.replacingOccurrences(of: "`([^`]+)`", with: "$1", options: .regularExpression)
-        
-        // Bold
-        result = result.replacingOccurrences(of: "\\*\\*([^*]+)\\*\\*", with: "$1", options: .regularExpression)
-        
-        // Italic
-        result = result.replacingOccurrences(of: "\\*([^*]+)\\*", with: "$1", options: .regularExpression)
-        
-        return AttributedString(result)
+        if let parsed = try? AttributedString(markdown: text) {
+            return parsed
+        }
+
+        return AttributedString(text)
     }
 }
 
 struct TypingIndicator: View {
-    @State private var phase = 0
+    @State private var phase = 0.0
     
     var body: some View {
         HStack {
@@ -340,7 +425,7 @@ struct ModelSelectorSheet: View {
                                 
                                 if selectedModel?.id == model.id {
                                     Image(systemName: "checkmark")
-                                        .foregroundStyle(.accent)
+                                        .foregroundStyle(Color.accentColor)
                                 }
                             }
                         }
@@ -371,38 +456,43 @@ class ChatViewModel: ObservableObject {
     @Published var isGenerating = false
     @Published var currentModel: DownloadedModel?
     @Published var errorMessage: String?
-    
-    func loadModel(for session: ChatSession) async {
-        // Load the model associated with this session
-        // This is a placeholder - in production, fetch from SwiftData
-    }
+    @Published var streamRevision = 0
     
     func sendMessage(_ content: String, in session: ChatSession, context: ModelContext) async {
         guard let model = currentModel else {
             errorMessage = "No model selected"
+            Task { @MainActor in
+                HapticManager.notification(.error)
+            }
             return
         }
+
+        let existingPromptTurns = session.orderedMessages
+            .filter { !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .map { PromptTurn(role: $0.roleValue, content: $0.content) }
         
-        // Create user message
         let userMessage = ChatMessage(role: .user, content: content)
         userMessage.session = session
         context.insert(userMessage)
-        
-        if session.messages == nil {
-            session.messages = []
-        }
-        session.messages?.append(userMessage)
         session.updatedAt = Date()
-        
+
         try? context.save()
-        
-        // Create assistant message placeholder
+
         let assistantMessage = ChatMessage(role: .assistant, content: "", isGenerating: true)
         assistantMessage.session = session
         context.insert(assistantMessage)
-        session.messages?.append(assistantMessage)
-        
+        try? context.save()
+
         isGenerating = true
+        streamRevision = 0
+        defer {
+            isGenerating = false
+        }
+
+        let conversationPrompt = PromptComposer.compose(
+            systemPrompt: nil,
+            messages: existingPromptTurns + [PromptTurn(role: userMessage.roleValue, content: userMessage.content)]
+        )
         
         do {
             // Validate model path before loading
@@ -415,25 +505,24 @@ class ChatViewModel: ObservableObject {
                 throw ModelError.modelNotFound
             }
             
-            // Load model if needed
-            if !ModelRunner.shared.isLoaded || ModelRunner.shared.loadedModelPath != model.localPath {
-                try await ModelRunner.shared.loadModel(
-                    from: model.localPath,
-                    contextLength: model.contextLength,
-                    gpuLayers: AppSettings.shared.gpuLayers
-                )
-            }
+            try await ModelRunner.shared.loadModel(
+                from: model.localPath,
+                contextLength: model.runtimeContextLength,
+                gpuLayers: AppSettings.shared.gpuLayers
+            )
             
             var generatedText = ""
-            let startTime = CFAbsoluteTimeGetCurrent()
+            let shouldStreamInUI = AppSettings.shared.streamingEnabled
             
             let result = try await ModelRunner.shared.generate(
-                prompt: content,
+                prompt: conversationPrompt,
                 systemPrompt: session.systemPrompt
             ) { token in
+                guard shouldStreamInUI else { return }
                 generatedText += token
                 Task { @MainActor in
                     assistantMessage.content = generatedText
+                    self.streamRevision += 1
                 }
             }
             
@@ -441,25 +530,34 @@ class ChatViewModel: ObservableObject {
             assistantMessage.isGenerating = false
             assistantMessage.tokenCount = result.tokensGenerated
             assistantMessage.generationTime = result.generationTime
+            streamRevision += 1
             
             session.updatedAt = Date()
             try? context.save()
+            Task { @MainActor in
+                if result.wasCancelled {
+                    HapticManager.impact(.medium)
+                } else {
+                    HapticManager.notification(.success)
+                }
+            }
             
         } catch {
             errorMessage = error.localizedDescription
             assistantMessage.content = "Error: \(error.localizedDescription)"
             assistantMessage.isGenerating = false
             try? context.save()
+            Task { @MainActor in
+                HapticManager.notification(.error)
+            }
         }
-        
-        isGenerating = false
     }
     
     func stopGeneration() {
-        Task {
-            await ModelRunner.shared.stopGeneration()
+        ModelRunner.shared.stopGeneration()
+        Task { @MainActor in
+            HapticManager.impact(.medium)
         }
-        isGenerating = false
     }
 }
 

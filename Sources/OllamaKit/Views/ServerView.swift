@@ -1,7 +1,12 @@
+import Foundation
 import SwiftUI
+import UIKit
+#if canImport(Darwin)
+import Darwin
+#endif
 
 struct ServerView: View {
-    @StateObject private var settings = AppSettings.shared
+    @ObservedObject private var settings = AppSettings.shared
     @StateObject private var viewModel = ServerViewModel()
     
     var body: some View {
@@ -66,6 +71,25 @@ struct ServerView: View {
         .onAppear {
             viewModel.refreshStatus()
         }
+        .onChange(of: settings.serverEnabled) { enabled in
+            Task {
+                if enabled {
+                    await viewModel.startServer()
+                } else {
+                    await viewModel.stopServer()
+                }
+            }
+        }
+        .onChange(of: settings.serverPort) { _ in
+            Task {
+                await viewModel.restartServerIfNeeded()
+            }
+        }
+        .onChange(of: settings.allowExternalConnections) { _ in
+            Task {
+                await viewModel.restartServerIfNeeded()
+            }
+        }
     }
 }
 
@@ -112,7 +136,7 @@ struct ServerStatusCard: View {
                     
                     Text("Port \(AppSettings.shared.serverPort)")
                         .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(.accent)
+                        .foregroundStyle(Color.accentColor)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 6)
                         .background(
@@ -169,7 +193,7 @@ struct ConnectionInfoCard: View {
             HStack {
                 Image(systemName: "network")
                     .font(.system(size: 20))
-                    .foregroundStyle(.accent)
+                    .foregroundStyle(Color.accentColor)
                 
                 Text("Connection URLs")
                     .font(.system(size: 20, weight: .bold))
@@ -194,6 +218,10 @@ struct ConnectionInfoCard: View {
                     )
                 }
             }
+
+            Text("Background availability is best-effort on iOS. The app can restart the server after background task wakeups, but iOS may still suspend the process.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
         }
         .padding(20)
         .background(
@@ -233,6 +261,9 @@ struct URLRow: View {
                 
                 Button {
                     UIPasteboard.general.string = url
+                    Task { @MainActor in
+                        HapticManager.notification(.success)
+                    }
                     withAnimation {
                         showingCopied = true
                     }
@@ -248,7 +279,7 @@ struct URLRow: View {
                         Text(showingCopied ? "Copied" : "Copy")
                             .font(.system(size: 12))
                     }
-                    .foregroundStyle(.accent)
+                    .foregroundStyle(Color.accentColor)
                 }
             }
             
@@ -291,7 +322,7 @@ struct ServerSettingsSection: View {
                 } label: {
                     Text("\(settings.serverPort)")
                         .font(.system(size: 16, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.accent)
+                        .foregroundStyle(Color.accentColor)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 8)
                         .background(
@@ -323,7 +354,7 @@ struct ServerSettingsSection: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Allow External Connections")
                         .font(.system(size: 16, weight: .medium))
-                    Text("Allow other devices to connect")
+                    Text("When off, only loopback clients can connect")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                 }
@@ -385,7 +416,7 @@ struct SecuritySettingsSection: View {
                         } label: {
                             Image(systemName: "doc.on.doc")
                                 .font(.system(size: 14))
-                                .foregroundStyle(.accent)
+                                .foregroundStyle(Color.accentColor)
                         }
                     }
                     .padding(.horizontal, 12)
@@ -407,7 +438,7 @@ struct SecuritySettingsSection: View {
                         Text("Regenerate API Key")
                     }
                     .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(.accent)
+                    .foregroundStyle(Color.accentColor)
                 }
                 .padding(.vertical, 12)
             }
@@ -422,10 +453,12 @@ struct APIDocsSection: View {
         ("GET", "/api/tags", "List available models"),
         ("POST", "/api/generate", "Generate text completion"),
         ("POST", "/api/chat", "Chat completion"),
-        ("POST", "/api/embed", "Generate embeddings"),
         ("POST", "/api/pull", "Download a model"),
         ("DELETE", "/api/delete", "Delete a model"),
-        ("GET", "/api/ps", "List running models")
+        ("GET", "/api/ps", "List running models"),
+        ("GET", "/v1/models", "OpenAI-compatible model list"),
+        ("POST", "/v1/completions", "OpenAI-compatible completions"),
+        ("POST", "/v1/chat/completions", "OpenAI-compatible chat")
     ]
     
     var body: some View {
@@ -498,6 +531,15 @@ struct PortPickerSheet: View {
     @Binding var port: Int
     @Environment(\.dismiss) private var dismiss
     @State private var tempPort: String = ""
+
+    private var parsedPort: Int? {
+        Int(tempPort)
+    }
+
+    private var isValidPort: Bool {
+        guard let parsedPort else { return false }
+        return (1024...65535).contains(parsedPort)
+    }
     
     var body: some View {
         NavigationStack {
@@ -514,7 +556,7 @@ struct PortPickerSheet: View {
                     Button("Use Default (11434)") {
                         tempPort = "11434"
                     }
-                    .foregroundStyle(.accent)
+                    .foregroundStyle(Color.accentColor)
                 }
             }
             .navigationTitle("Server Port")
@@ -526,12 +568,12 @@ struct PortPickerSheet: View {
                 
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        if let newPort = Int(tempPort), newPort >= 1024, newPort <= 65535 {
+                        if let newPort = parsedPort, isValidPort {
                             port = newPort
                         }
                         dismiss()
                     }
-                    .disabled(Int(tempPort) == nil)
+                    .disabled(!isValidPort)
                 }
             }
             .onAppear {
@@ -550,7 +592,7 @@ struct APIDocumentationView: View {
                 VStack(alignment: .leading, spacing: 24) {
                     // Introduction
                     DocSection(title: "Introduction") {
-                        Text("OllamaKit provides an OpenAI-compatible API for running local LLMs. The server runs on your device and can be accessed by other applications.")
+                        Text("OllamaKit provides a local API server with Ollama-style routes and a subset of OpenAI-compatible `/v1` routes. The server runs on your device and can be accessed by other applications on the same device or, if enabled, on your local network.")
                             .font(.system(size: 15))
                     }
                     
@@ -584,12 +626,37 @@ struct APIDocumentationView: View {
                                 curl -X POST http://localhost:11434/api/generate \\
                                   -H "Content-Type: application/json" \\
                                   -d '{
-                                    "model": "llama2",
+                                    "model": "MODEL_ID_FROM_/api/tags",
                                     "prompt": "Why is the sky blue?"
                                   }'
                                 """
                             )
                             
+                            EndpointDoc(
+                                method: "GET",
+                                path: "/v1/models",
+                                description: "OpenAI-compatible model list",
+                                example: """
+                                curl http://localhost:11434/v1/models
+                                """
+                            )
+
+                            EndpointDoc(
+                                method: "POST",
+                                path: "/v1/chat/completions",
+                                description: "OpenAI-compatible chat completions",
+                                example: """
+                                curl -X POST http://localhost:11434/v1/chat/completions \\
+                                  -H "Content-Type: application/json" \\
+                                  -d '{
+                                    "model": "MODEL_ID_FROM_/v1/models",
+                                    "messages": [
+                                      {"role": "user", "content": "Hello!"}
+                                    ]
+                                  }'
+                                """
+                            )
+
                             EndpointDoc(
                                 method: "POST",
                                 path: "/api/chat",
@@ -598,7 +665,7 @@ struct APIDocumentationView: View {
                                 curl -X POST http://localhost:11434/api/chat \\
                                   -H "Content-Type: application/json" \\
                                   -d '{
-                                    "model": "llama2",
+                                    "model": "MODEL_ID_FROM_/api/tags",
                                     "messages": [
                                       {"role": "user", "content": "Hello!"}
                                     ]
@@ -611,6 +678,10 @@ struct APIDocumentationView: View {
                     // Parameters
                     DocSection(title: "Generation Parameters") {
                         VStack(alignment: .leading, spacing: 8) {
+                            Text("Use the exact model identifier returned by `/api/tags` or `/v1/models`. If multiple quantizations from one repo are installed, the identifier includes the downloaded file name.")
+                                .font(.system(size: 14))
+                                .foregroundStyle(.secondary)
+
                             ParameterRow(name: "temperature", type: "float", default: "0.7", description: "Sampling temperature")
                             ParameterRow(name: "top_p", type: "float", default: "0.9", description: "Nucleus sampling")
                             ParameterRow(name: "top_k", type: "int", default: "40", description: "Top-k sampling")
@@ -714,8 +785,15 @@ struct EndpointDoc: View {
 struct ParameterRow: View {
     let name: String
     let type: String
-    let `default`: String
+    let defaultValue: String
     let description: String
+
+    init(name: String, type: String, default defaultValue: String, description: String) {
+        self.name = name
+        self.type = type
+        self.defaultValue = defaultValue
+        self.description = description
+    }
     
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -726,9 +804,9 @@ struct ParameterRow: View {
                 HStack(spacing: 4) {
                     Text(type)
                         .font(.system(size: 11))
-                        .foregroundStyle(.accent)
+                        .foregroundStyle(Color.accentColor)
                     
-                    Text("default: \(`default`)")
+                    Text("default: \(defaultValue)")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -749,20 +827,38 @@ class ServerViewModel: ObservableObject {
     
     func refreshStatus() {
         Task {
-            isRunning = await ServerManager.shared.isServerRunning
+            isRunning = ServerManager.shared.isServerRunning
             updateNetworkURL()
         }
     }
     
     func startServer() async {
         await ServerManager.shared.startServer()
-        isRunning = await ServerManager.shared.isServerRunning
+        isRunning = ServerManager.shared.isServerRunning
         updateNetworkURL()
+        if isRunning {
+            if AppSettings.shared.serverEnabled {
+                BackgroundTaskManager.shared.scheduleBackgroundTask()
+            }
+            HapticManager.notification(.success)
+        }
     }
     
     func stopServer() async {
         await ServerManager.shared.stopServer()
-        isRunning = await ServerManager.shared.isServerRunning
+        BackgroundTaskManager.shared.cancelScheduledBackgroundTask()
+        isRunning = ServerManager.shared.isServerRunning
+        HapticManager.impact(.medium)
+    }
+
+    func restartServerIfNeeded() async {
+        let wasRunning = ServerManager.shared.isServerRunning
+        await ServerManager.shared.restartServerIfRunning()
+        isRunning = ServerManager.shared.isServerRunning
+        updateNetworkURL()
+        if wasRunning && isRunning {
+            HapticManager.selectionChanged()
+        }
     }
     
     private func updateNetworkURL() {

@@ -95,6 +95,12 @@ Models/
 *.gguf
 *.bin
 
+# Local runtime build outputs
+.deps/
+Vendor/llama.xcframework/
+Vendor/*.zip
+tmp/
+
 # IDE
 .vscode/
 .idea/

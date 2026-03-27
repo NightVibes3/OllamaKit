@@ -11,21 +11,35 @@ class BackgroundTaskManager {
     }
     
     func registerBackgroundTask() {
-        BGTaskScheduler.shared.register(forTaskWithIdentifier: backgroundTaskIdentifier, using: nil) { [weak self] task in
-            self?.handleBackgroundTask(task as! BGProcessingTask)
+        let registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: backgroundTaskIdentifier, using: nil) { [weak self] task in
+            guard let processingTask = task as? BGProcessingTask else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            self?.handleBackgroundTask(processingTask)
+        }
+        if !registered {
+            print("Failed to register background task identifier: \(backgroundTaskIdentifier)")
         }
     }
     
     func scheduleBackgroundTask() {
+        guard AppSettings.shared.serverEnabled else { return }
+
         let request = BGProcessingTaskRequest(identifier: backgroundTaskIdentifier)
         request.requiresNetworkConnectivity = true
         request.requiresExternalPower = false
         
         do {
+            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: backgroundTaskIdentifier)
             try BGTaskScheduler.shared.submit(request)
         } catch {
             print("Failed to schedule background task: \(error)")
         }
+    }
+
+    func cancelScheduledBackgroundTask() {
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: backgroundTaskIdentifier)
     }
     
     private func handleBackgroundTask(_ task: BGProcessingTask) {

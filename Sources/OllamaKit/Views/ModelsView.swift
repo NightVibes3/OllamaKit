@@ -6,7 +6,6 @@ struct ModelsView: View {
     @Query(sort: \DownloadedModel.downloadDate, order: .reverse) private var downloadedModels: [DownloadedModel]
     
     @StateObject private var viewModel = ModelsViewModel()
-    @State private var searchText = ""
     @State private var showingSearch = false
     
     var body: some View {
@@ -61,28 +60,46 @@ struct ModelsView: View {
         .sheet(isPresented: $showingSearch) {
             ModelSearchSheet()
         }
-        .alert("Error", isPresented: $viewModel.showError) {
-            Button("OK") {}
-        } message: {
-            Text(viewModel.errorMessage)
+        .alert(isPresented: $viewModel.showError) {
+            Alert(
+                title: Text(viewModel.alertTitle),
+                message: Text(viewModel.errorMessage),
+                dismissButton: .default(Text("OK"))
+            )
         }
     }
     
     private func deleteModels(at offsets: IndexSet) {
-        for index in offsets {
-            let model = downloadedModels[index]
+        let modelsToDelete = offsets.compactMap { index in
+            downloadedModels.indices.contains(index) ? downloadedModels[index] : nil
+        }
+
+        for model in modelsToDelete {
             
             // Delete file
             try? FileManager.default.removeItem(atPath: model.localPath)
+
+            if ModelRunner.shared.loadedModelPath == model.localPath {
+                ModelRunner.shared.unloadModel()
+            }
+            if model.matchesStoredReference(AppSettings.shared.defaultModelId) {
+                AppSettings.shared.defaultModelId = ""
+            }
             
             // Delete from database
             modelContext.delete(model)
         }
         try? modelContext.save()
+        Task { @MainActor in
+            HapticManager.notification(.warning)
+        }
     }
 }
 
 struct DownloadedModelRow: View {
+    @Environment(\.modelContext) private var modelContext
+    @ObservedObject private var modelRunner = ModelRunner.shared
+    @ObservedObject private var settings = AppSettings.shared
     let model: DownloadedModel
     @ObservedObject var viewModel: ModelsViewModel
     @State private var showingOptions = false
@@ -97,7 +114,7 @@ struct DownloadedModelRow: View {
                 
                 Image(systemName: "cube.fill")
                     .font(.system(size: 24))
-                    .foregroundStyle(.accent)
+                    .foregroundStyle(Color.accentColor)
             }
             
             VStack(alignment: .leading, spacing: 6) {
@@ -118,7 +135,7 @@ struct DownloadedModelRow: View {
                 }
                 
                 HStack(spacing: 12) {
-                    Label("\(model.contextLength) ctx", systemImage: "text.alignleft")
+                    Label("\(max(settings.defaultContextLength, 512)) ctx", systemImage: "text.alignleft")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                     
@@ -133,7 +150,7 @@ struct DownloadedModelRow: View {
             Spacer()
             
             // Status indicator
-            if ModelRunner.shared.isLoaded && ModelRunner.shared.loadedModelPath == model.localPath {
+            if modelRunner.activeLoadedModelPath == model.localPath {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .font(.system(size: 22))
@@ -167,11 +184,18 @@ struct DownloadedModelRow: View {
                     do {
                         try await ModelRunner.shared.loadModel(
                             from: model.localPath,
-                            contextLength: model.contextLength
+                            contextLength: model.runtimeContextLength,
+                            gpuLayers: AppSettings.shared.gpuLayers
                         )
+                        await MainActor.run {
+                            HapticManager.notification(.success)
+                        }
                     } catch {
                         viewModel.errorMessage = error.localizedDescription
                         viewModel.showError = true
+                        await MainActor.run {
+                            HapticManager.notification(.error)
+                        }
                     }
                 }
             } label: {
@@ -180,12 +204,16 @@ struct DownloadedModelRow: View {
             
             Button {
                 model.isFavorite.toggle()
+                try? modelContext.save()
+                Task { @MainActor in
+                    HapticManager.selectionChanged()
+                }
             } label: {
                 Label(model.isFavorite ? "Unfavorite" : "Favorite", systemImage: model.isFavorite ? "star.slash" : "star")
             }
             
             Button(role: .destructive) {
-                // Delete
+                deleteModel()
             } label: {
                 Label("Delete", systemImage: "trash")
             }
@@ -209,24 +237,59 @@ struct DownloadedModelRow: View {
                     do {
                         try await ModelRunner.shared.loadModel(
                             from: model.localPath,
-                            contextLength: model.contextLength
+                            contextLength: model.runtimeContextLength,
+                            gpuLayers: AppSettings.shared.gpuLayers
                         )
+                        await MainActor.run {
+                            HapticManager.notification(.success)
+                        }
                     } catch {
                         viewModel.errorMessage = error.localizedDescription
                         viewModel.showError = true
+                        await MainActor.run {
+                            HapticManager.notification(.error)
+                        }
                     }
                 }
             }
             
             Button("Set as Default") {
-                // Set as default
+                AppSettings.shared.defaultModelId = model.persistentReference
+                viewModel.alertTitle = "Default Model"
+                viewModel.errorMessage = "\(model.displayName) will be preselected for new chats."
+                viewModel.showError = true
+                Task { @MainActor in
+                    HapticManager.selectionChanged()
+                }
             }
             
             Button("View Info") {
-                // Show info
+                viewModel.alertTitle = "Model Info"
+                viewModel.errorMessage = "Model: \(model.displayName)\nQuantization: \(model.quantization)\nContext: \(model.runtimeContextLength)\nPath: \(model.localPath)"
+                viewModel.showError = true
             }
             
+            Button("Delete", role: .destructive) {
+                deleteModel()
+            }
             Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    private func deleteModel() {
+        if !model.localPath.isEmpty {
+            try? FileManager.default.removeItem(atPath: model.localPath)
+        }
+        if ModelRunner.shared.loadedModelPath == model.localPath {
+            ModelRunner.shared.unloadModel()
+        }
+        if model.matchesStoredReference(AppSettings.shared.defaultModelId) {
+            AppSettings.shared.defaultModelId = ""
+        }
+        modelContext.delete(model)
+        try? modelContext.save()
+        Task { @MainActor in
+            HapticManager.notification(.warning)
         }
     }
 }
@@ -315,7 +378,6 @@ struct BrowseMoreCard: View {
 
 struct ModelSearchSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.modelContext) private var modelContext
     
     @StateObject private var searchVM = ModelSearchViewModel()
     @State private var searchText = ""
@@ -409,12 +471,22 @@ struct ModelSearchSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                        .disabled(searchVM.isDownloading)
                 }
+            }
+            .alert("Download Failed", isPresented: Binding(
+                get: { searchVM.downloadError != nil },
+                set: { if !$0 { searchVM.downloadError = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(searchVM.downloadError ?? "")
             }
             .sheet(item: $searchVM.selectedModel) { model in
                 ModelDetailSheet(model: model, viewModel: searchVM)
             }
         }
+        .interactiveDismissDisabled(searchVM.isDownloading)
     }
 }
 
@@ -434,7 +506,7 @@ struct SearchResultRow: View {
                     
                     Image(systemName: "cube")
                         .font(.system(size: 20))
-                        .foregroundStyle(.accent)
+                        .foregroundStyle(Color.accentColor)
                 }
                 
                 VStack(alignment: .leading, spacing: 4) {
@@ -469,6 +541,7 @@ struct SearchResultRow: View {
         }
         .buttonStyle(.plain)
         .padding(.vertical, 4)
+        .disabled(viewModel.isDownloading)
     }
     
     func formatNumber(_ num: Int) -> String {
@@ -485,7 +558,6 @@ struct ModelDetailSheet: View {
     let model: HuggingFaceModel
     @ObservedObject var viewModel: ModelSearchViewModel
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.modelContext) private var modelContext
     
     var body: some View {
         NavigationStack {
@@ -539,7 +611,11 @@ struct ModelDetailSheet: View {
                                 .padding(.vertical, 20)
                         } else {
                             ForEach(viewModel.availableFiles) { file in
-                                GGUFFileRow(file: file, viewModel: viewModel)
+                                GGUFFileRow(file: file, viewModel: viewModel) {
+                                    Task {
+                                        await viewModel.downloadFile(file, modelId: model.modelId)
+                                    }
+                                }
                             }
                         }
                     } header: {
@@ -559,12 +635,14 @@ struct ModelDetailSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") { dismiss() }
+                        .disabled(viewModel.isDownloading)
                 }
             }
             .task {
                 await viewModel.loadFiles(for: model.modelId)
             }
         }
+        .interactiveDismissDisabled(viewModel.isDownloading)
     }
     
     func formatNumber(_ num: Int) -> String {
@@ -607,6 +685,7 @@ struct StatBadge: View {
 struct GGUFFileRow: View {
     let file: GGUFInfo
     @ObservedObject var viewModel: ModelSearchViewModel
+    let downloadAction: () -> Void
     
     var body: some View {
         HStack(spacing: 12) {
@@ -633,24 +712,30 @@ struct GGUFFileRow: View {
             Spacer()
             
             if viewModel.isDownloading && viewModel.downloadingFile?.url == file.url {
-                // Show progress
-                VStack(alignment: .trailing, spacing: 4) {
-                    Text("\(viewModel.downloadProgress)%")
-                        .font(.system(size: 12, weight: .medium))
-                    
-                    ProgressView(value: Double(viewModel.downloadProgress) / 100.0)
-                        .frame(width: 60)
+                HStack(spacing: 8) {
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Text("\(viewModel.downloadProgress)%")
+                            .font(.system(size: 12, weight: .medium))
+                        
+                        ProgressView(value: Double(viewModel.downloadProgress) / 100.0)
+                            .frame(width: 60)
+                    }
+
+                    Button {
+                        viewModel.cancelCurrentDownload()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 22))
+                            .foregroundStyle(.secondary)
+                    }
                 }
             } else {
-                Button {
-                    Task {
-                        await viewModel.downloadFile(file)
-                    }
-                } label: {
+                Button(action: downloadAction) {
                     Image(systemName: "arrow.down.circle.fill")
                         .font(.system(size: 28))
-                        .foregroundStyle(.accent)
+                        .foregroundStyle(Color.accentColor)
                 }
+                .disabled(viewModel.isDownloading)
             }
         }
         .padding(.vertical, 4)
@@ -660,6 +745,7 @@ struct GGUFFileRow: View {
 @MainActor
 class ModelsViewModel: ObservableObject {
     @Published var showError = false
+    @Published var alertTitle = "Error"
     @Published var errorMessage = ""
 }
 
@@ -675,42 +761,105 @@ class ModelSearchViewModel: ObservableObject {
     @Published var isDownloading = false
     @Published var downloadingFile: GGUFInfo?
     @Published var downloadProgress = 0
+    @Published var downloadError: String?
+
+    private var searchRequestID = UUID()
+    private var filesRequestID = UUID()
     
     func search(query: String) async {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let requestID = UUID()
+        searchRequestID = requestID
+
+        guard !trimmedQuery.isEmpty else {
+            results = []
+            isSearching = false
+            return
+        }
+
         isSearching = true
-        defer { isSearching = false }
         
         do {
-            results = try await HuggingFaceService.shared.searchModels(query: query)
+            let fetchedResults = try await HuggingFaceService.shared.searchModels(query: trimmedQuery)
+            guard searchRequestID == requestID else { return }
+            results = fetchedResults
         } catch {
+            guard searchRequestID == requestID else { return }
             results = []
         }
+
+        guard searchRequestID == requestID else { return }
+        isSearching = false
     }
     
     func loadFiles(for modelId: String) async {
+        let requestID = UUID()
+        filesRequestID = requestID
+        availableFiles = []
         isLoadingFiles = true
-        defer { isLoadingFiles = false }
         
         do {
-            availableFiles = try await HuggingFaceService.shared.getModelFiles(modelId: modelId)
+            let files = try await HuggingFaceService.shared.getModelFiles(modelId: modelId)
+            guard filesRequestID == requestID else { return }
+            availableFiles = files
         } catch {
+            guard filesRequestID == requestID else { return }
             availableFiles = []
         }
+
+        guard filesRequestID == requestID else { return }
+        isLoadingFiles = false
     }
     
-    func downloadFile(_ file: GGUFInfo) async {
+    func downloadFile(_ file: GGUFInfo, modelId: String) async {
+        downloadError = nil
         isDownloading = true
         downloadingFile = file
         downloadProgress = 0
-        
-        // Simulate download progress
-        for i in stride(from: 0, to: 100, by: 5) {
-            downloadProgress = i
-            try? await Task.sleep(nanoseconds: 100_000_000)
+
+        defer {
+            isDownloading = false
+            downloadingFile = nil
         }
-        
-        isDownloading = false
-        downloadingFile = nil
+
+        do {
+            let model = try await HuggingFaceService.shared.downloadModel(
+                from: file.url,
+                filename: file.filename,
+                modelId: modelId
+            ) { progress in
+                Task { @MainActor in
+                    self.downloadProgress = progress.percentage
+                }
+            }
+
+            ModelStorage.shared.upsertDownloadedModel(model)
+            downloadProgress = 100
+            HapticManager.notification(.success)
+        } catch {
+            if isCancellationError(error) {
+                downloadProgress = 0
+                HapticManager.impact(.medium)
+                return
+            }
+
+            downloadError = error.localizedDescription
+            HapticManager.notification(.error)
+        }
+    }
+
+    func cancelCurrentDownload() {
+        guard let downloadingFile else { return }
+        HuggingFaceService.shared.cancelDownload(id: downloadingFile.id)
+    }
+
+    private func isCancellationError(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
     }
 }
 
