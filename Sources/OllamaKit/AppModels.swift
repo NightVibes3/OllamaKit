@@ -7,6 +7,137 @@ import UIKit
 import FoundationModels
 #endif
 
+enum ServerExposureMode: String, CaseIterable, Identifiable {
+    case localOnly
+    case localNetwork
+    case publicURL
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .localOnly:
+            return "Local Only"
+        case .localNetwork:
+            return "Local Network"
+        case .publicURL:
+            return "Public URL"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .localOnly:
+            return "Only loopback clients on this device can connect."
+        case .localNetwork:
+            return "Other devices that can reach this device on the network can connect."
+        case .publicURL:
+            return "Use a user-managed tunnel or reverse proxy URL as the worldwide endpoint."
+        }
+    }
+
+    var allowsRemoteConnections: Bool {
+        self != .localOnly
+    }
+}
+
+enum ServerLogLevel: String, CaseIterable, Identifiable, Sendable {
+    case debug
+    case info
+    case warning
+    case error
+
+    var id: String { rawValue }
+}
+
+enum ServerLogCategory: String, CaseIterable, Identifiable, Sendable {
+    case listener
+    case connection
+    case auth
+    case request
+    case routing
+    case model
+    case generation
+    case stream
+    case response
+    case health
+    case error
+
+    var id: String { rawValue }
+}
+
+struct ServerLogEntry: Identifiable, Hashable, Sendable {
+    let id: UUID
+    let timestamp: Date
+    let level: ServerLogLevel
+    let category: ServerLogCategory
+    let title: String
+    let message: String
+    let requestID: String?
+    let body: String?
+    let metadata: [String: String]
+
+    init(
+        id: UUID = UUID(),
+        timestamp: Date = .now,
+        level: ServerLogLevel,
+        category: ServerLogCategory,
+        title: String,
+        message: String,
+        requestID: String? = nil,
+        body: String? = nil,
+        metadata: [String: String] = [:]
+    ) {
+        self.id = id
+        self.timestamp = timestamp
+        self.level = level
+        self.category = category
+        self.title = title
+        self.message = message
+        self.requestID = requestID
+        self.body = body?.nonEmpty
+        self.metadata = metadata
+    }
+}
+
+@MainActor
+final class ServerLogStore: ObservableObject {
+    static let shared = ServerLogStore()
+    private let maxEntries = 600
+
+    @Published private(set) var entries: [ServerLogEntry] = []
+
+    private init() {}
+
+    func record(_ entry: ServerLogEntry) {
+        entries.append(entry)
+        let overflow = entries.count - maxEntries
+        if overflow > 0 {
+            entries.removeFirst(overflow)
+        }
+    }
+
+    func clear() {
+        entries.removeAll()
+    }
+
+    func exportText() -> String {
+        entries.map { entry in
+            let timestamp = ISO8601DateFormatter().string(from: entry.timestamp)
+            let requestPart = entry.requestID.map { " [\($0)]" } ?? ""
+            let metadataPart = entry.metadata.isEmpty
+                ? ""
+                : " " + entry.metadata
+                    .sorted { $0.key < $1.key }
+                    .map { "\($0.key)=\($0.value)" }
+                    .joined(separator: " ")
+            let bodyPart = entry.body.map { "\n\($0)" } ?? ""
+            return "[\(timestamp)] [\(entry.level.rawValue.uppercased())] [\(entry.category.rawValue)]\(requestPart) \(entry.title): \(entry.message)\(metadataPart)\(bodyPart)"
+        }
+        .joined(separator: "\n\n")
+    }
+}
+
 @Model
 final class DownloadedModel {
     var id: UUID
@@ -147,6 +278,7 @@ struct DownloadedModelSeed: Sendable {
     let quantization: String
     let parameters: String
     let contextLength: Int
+    let serverCapabilities: ServerModelCapabilities?
 }
 
 extension DownloadedModel {
@@ -158,7 +290,8 @@ extension DownloadedModel {
             size: size,
             quantization: quantization,
             parameters: parameters,
-            contextLength: contextLength
+            contextLength: contextLength,
+            serverCapabilities: nil
         )
     }
 }
@@ -214,11 +347,11 @@ enum BuiltInModelCatalog {
         return downloadedModels.filter { model in
             switch model.backendKind {
             case .ggufLlama:
-                return model.fileExists
+                return model.canBeSelectedForChat
             case .appleFoundation:
                 return appleIsAvailable
             case .coreMLPackage:
-                return model.hasRunnableCoreMLPayload
+                return model.canBeSelectedForChat
             }
         }
     }
@@ -341,12 +474,34 @@ final class ChatMessage {
     }
 }
 
-struct HuggingFaceModel: Decodable, Identifiable, Hashable {
+struct HuggingFaceSibling: Decodable, Hashable, Sendable {
+    let rfilename: String?
+    let path: String?
+
+    var filename: String? {
+        let candidate = rfilename?.nonEmpty ?? path?.nonEmpty
+        return candidate.map { URL(fileURLWithPath: $0).lastPathComponent }
+    }
+}
+
+struct HuggingFaceGGUFMetadata: Decodable, Hashable, Sendable {
+    let contextLength: Int?
+    let chatTemplate: String?
+}
+
+struct HuggingFaceModel: Decodable, Identifiable, Hashable, Sendable {
     let id: String
     let description: String?
     let downloads: Int?
     let likes: Int?
     let tags: [String]?
+    let author: String?
+    let pipelineTag: String?
+    let libraryName: String?
+    let gated: Bool?
+    let disabled: Bool?
+    let siblings: [HuggingFaceSibling]?
+    let gguf: HuggingFaceGGUFMetadata?
 
     var modelId: String { id }
 
@@ -361,9 +516,45 @@ struct HuggingFaceModel: Decodable, Identifiable, Hashable {
         }
         return "Hugging Face"
     }
+
+    var isGated: Bool {
+        gated ?? false
+    }
+
+    var isDisabled: Bool {
+        disabled ?? false
+    }
+
+    var siblingFilenames: [String] {
+        (siblings ?? []).compactMap(\.filename)
+    }
+
+    var repositoryMetadata: HuggingFaceRepositoryMetadata {
+        HuggingFaceRepositoryMetadata(
+            modelId: modelId,
+            displayName: displayName,
+            organization: organization,
+            description: description,
+            downloads: downloads ?? 0,
+            likes: likes ?? 0,
+            tags: tags ?? [],
+            author: author,
+            pipelineTag: pipelineTag,
+            libraryName: libraryName,
+            gated: isGated,
+            disabled: isDisabled,
+            ggufContextLength: gguf?.contextLength,
+            hasChatTemplate: gguf?.chatTemplate?.nonEmpty != nil,
+            siblingFilenames: siblingFilenames
+        )
+    }
+
+    var repositoryAssessment: HuggingFaceRepositoryAssessment {
+        HuggingFaceRepositoryAssessor.assess(repositoryMetadata)
+    }
 }
 
-struct GGUFInfo: Identifiable, Hashable {
+struct GGUFInfo: Identifiable, Hashable, Sendable {
     let url: URL
     let filename: String
     let size: Int64?
@@ -371,6 +562,151 @@ struct GGUFInfo: Identifiable, Hashable {
 
     var id: String { url.absoluteString }
     var displayName: String { filename }
+}
+
+struct HuggingFaceRepositoryMetadata: Hashable, Sendable {
+    let modelId: String
+    let displayName: String
+    let organization: String
+    let description: String?
+    let downloads: Int
+    let likes: Int
+    let tags: [String]
+    let author: String?
+    let pipelineTag: String?
+    let libraryName: String?
+    let gated: Bool
+    let disabled: Bool
+    let ggufContextLength: Int?
+    let hasChatTemplate: Bool
+    let siblingFilenames: [String]
+}
+
+enum HuggingFaceRepositoryDisposition: String, Hashable, Sendable {
+    case recommended
+    case caution
+    case blocked
+}
+
+struct HuggingFaceRepositoryAssessment: Hashable, Sendable {
+    let disposition: HuggingFaceRepositoryDisposition
+    let reason: String
+    let warningBadges: [String]
+    let isConversational: Bool
+    let isSuggestedEligible: Bool
+    let isResolutionEligible: Bool
+}
+
+struct HuggingFaceCandidate: Identifiable, Hashable, Sendable {
+    let model: HuggingFaceModel
+    let file: GGUFInfo
+    let assessment: HuggingFaceRepositoryAssessment
+    let compatibility: CompatibilityReport
+
+    var id: String {
+        "\(model.modelId)#\(file.filename)"
+    }
+
+    var isSuggested: Bool {
+        assessment.isSuggestedEligible && compatibility.level.isUsable
+    }
+}
+
+enum HuggingFaceRepositoryAssessor {
+    private static let generativePipelineTags: Set<String> = [
+        "text-generation",
+        "conversational"
+    ]
+
+    private static let excludedPipelineTags: Set<String> = [
+        "feature-extraction",
+        "sentence-similarity",
+        "fill-mask",
+        "token-classification",
+        "text-classification",
+        "zero-shot-classification"
+    ]
+
+    static func assess(_ metadata: HuggingFaceRepositoryMetadata) -> HuggingFaceRepositoryAssessment {
+        let normalizedPipelineTag = metadata.pipelineTag?.trimmedForLookup.lowercased()
+        let normalizedModelID = metadata.modelId.trimmedForLookup.lowercased()
+        let normalizedDescription = metadata.description?.trimmedForLookup.lowercased() ?? ""
+        let normalizedTags = metadata.tags.map { $0.trimmedForLookup.lowercased() }
+        let combinedSignals = normalizedTags + [normalizedModelID, normalizedDescription]
+
+        let isPlaceholder = normalizedModelID.contains("models-moved")
+            || normalizedModelID.contains("placeholder")
+            || normalizedDescription.contains("moved to")
+        let isEmbedding = excludedPipelineTags.contains(normalizedPipelineTag ?? "")
+            || combinedSignals.contains(where: { $0.contains("embedding") || $0.contains("feature-extraction") || $0.contains("rerank") })
+        let isConversational = generativePipelineTags.contains(normalizedPipelineTag ?? "")
+            || combinedSignals.contains(where: { $0.contains("instruct") || $0.contains("chat") || $0.contains("assistant") })
+            || metadata.hasChatTemplate
+
+        if metadata.disabled {
+            return HuggingFaceRepositoryAssessment(
+                disposition: .blocked,
+                reason: "This repository is disabled on Hugging Face.",
+                warningBadges: ["Disabled"],
+                isConversational: isConversational,
+                isSuggestedEligible: false,
+                isResolutionEligible: false
+            )
+        }
+
+        if metadata.gated {
+            return HuggingFaceRepositoryAssessment(
+                disposition: .blocked,
+                reason: "This repository is gated and may not be downloadable on-device without extra access.",
+                warningBadges: ["Gated"],
+                isConversational: isConversational,
+                isSuggestedEligible: false,
+                isResolutionEligible: false
+            )
+        }
+
+        if isPlaceholder {
+            return HuggingFaceRepositoryAssessment(
+                disposition: .blocked,
+                reason: "This repository looks like a placeholder or redirect, not a real downloadable chat model.",
+                warningBadges: ["Placeholder"],
+                isConversational: false,
+                isSuggestedEligible: false,
+                isResolutionEligible: false
+            )
+        }
+
+        if isEmbedding {
+            return HuggingFaceRepositoryAssessment(
+                disposition: .caution,
+                reason: "This repository looks like an embedding or feature-extraction model, not a normal chat/generation model.",
+                warningBadges: ["Embeddings"],
+                isConversational: false,
+                isSuggestedEligible: false,
+                isResolutionEligible: false
+            )
+        }
+
+        if isConversational {
+            return HuggingFaceRepositoryAssessment(
+                disposition: .recommended,
+                reason: "This repository looks like a real chat or text-generation model.",
+                warningBadges: [],
+                isConversational: true,
+                isSuggestedEligible: true,
+                isResolutionEligible: true
+            )
+        }
+
+        return HuggingFaceRepositoryAssessment(
+            disposition: .caution,
+            reason: "This repository is downloadable, but it does not clearly advertise itself as a chat/text-generation model.",
+            warningBadges: ["Unverified"],
+            isConversational: false,
+            isSuggestedEligible: false,
+            isResolutionEligible: false
+        )
+    }
 }
 
 struct PromptTurn: Sendable {
@@ -497,10 +833,59 @@ final class AppSettings: ObservableObject {
 
     @Published var serverEnabled: Bool { didSet { save(serverEnabled, for: Keys.serverEnabled) } }
     @Published var serverPort: Int { didSet { save(serverPort, for: Keys.serverPort) } }
-    @Published var allowExternalConnections: Bool { didSet { save(allowExternalConnections, for: Keys.allowExternalConnections) } }
-    @Published var requireApiKey: Bool { didSet { save(requireApiKey, for: Keys.requireApiKey) } }
-    @Published var apiKey: String { didSet { save(apiKey, for: Keys.apiKey) } }
+    @Published var serverExposureMode: ServerExposureMode {
+        didSet {
+            save(serverExposureMode.rawValue, for: Keys.serverExposureMode)
+            save(serverExposureMode.allowsRemoteConnections, for: Keys.allowExternalConnections)
+            enforcePublicServerSecurity()
+        }
+    }
+    @Published var publicBaseURL: String { didSet { save(publicBaseURL, for: Keys.publicBaseURL) } }
+    @Published var requireApiKey: Bool {
+        didSet {
+            if serverExposureMode == .publicURL && !requireApiKey {
+                requireApiKey = true
+                return
+            }
+            save(requireApiKey, for: Keys.requireApiKey)
+        }
+    }
+    @Published var apiKey: String {
+        didSet {
+            if serverExposureMode == .publicURL && apiKey.trimmedForLookup.isEmpty {
+                apiKey = Self.generatedAPIKey()
+                return
+            }
+            save(apiKey, for: Keys.apiKey)
+        }
+    }
     @Published var defaultModelId: String { didSet { save(defaultModelId, for: Keys.defaultModelId) } }
+    @Published var powerAgentEnabled: Bool { didSet { save(powerAgentEnabled, for: Keys.powerAgentEnabled) } }
+    @Published var agentRequireWriteApproval: Bool { didSet { save(agentRequireWriteApproval, for: Keys.agentRequireWriteApproval) } }
+    @Published var agentGitHubToken: String { didSet { save(agentGitHubToken, for: Keys.agentGitHubToken) } }
+    @Published var agentGitHubClientID: String { didSet { save(agentGitHubClientID, for: Keys.agentGitHubClientID) } }
+    @Published var agentGitHubRepository: String { didSet { save(agentGitHubRepository, for: Keys.agentGitHubRepository) } }
+    @Published var agentDefaultWorkspaceID: String { didSet { save(agentDefaultWorkspaceID, for: Keys.agentDefaultWorkspaceID) } }
+    @Published var agentGitHubDeviceCode: String { didSet { save(agentGitHubDeviceCode, for: Keys.agentGitHubDeviceCode) } }
+    @Published var agentGitHubUserCode: String { didSet { save(agentGitHubUserCode, for: Keys.agentGitHubUserCode) } }
+    @Published var agentGitHubVerificationURL: String { didSet { save(agentGitHubVerificationURL, for: Keys.agentGitHubVerificationURL) } }
+    @Published var agentGitHubDeviceFlowExpiresAt: Date? {
+        didSet {
+            if let agentGitHubDeviceFlowExpiresAt {
+                save(agentGitHubDeviceFlowExpiresAt.timeIntervalSince1970, for: Keys.agentGitHubDeviceFlowExpiresAt)
+            } else {
+                defaults.removeObject(forKey: Keys.agentGitHubDeviceFlowExpiresAt)
+            }
+        }
+    }
+    @Published var agentBrowserHomeURL: String { didSet { save(agentBrowserHomeURL, for: Keys.agentBrowserHomeURL) } }
+    @Published var agentBrowserLastURL: String { didSet { save(agentBrowserLastURL, for: Keys.agentBrowserLastURL) } }
+    @Published var agentBundleExpertMode: Bool { didSet { save(agentBundleExpertMode, for: Keys.agentBundleExpertMode) } }
+    @Published var agentModelCapabilityOverrides: [String: ModelAgentCapabilityOverride] {
+        didSet {
+            saveCodable(agentModelCapabilityOverrides, for: Keys.agentModelCapabilityOverrides)
+        }
+    }
 
     private let defaults: UserDefaults
 
@@ -535,18 +920,90 @@ final class AppSettings: ObservableObject {
 
         serverEnabled = defaults.object(forKey: Keys.serverEnabled) as? Bool ?? false
         serverPort = defaults.object(forKey: Keys.serverPort) as? Int ?? 11434
-        allowExternalConnections = defaults.object(forKey: Keys.allowExternalConnections) as? Bool ?? false
+        if let rawMode = defaults.string(forKey: Keys.serverExposureMode),
+           let persistedMode = ServerExposureMode(rawValue: rawMode) {
+            serverExposureMode = persistedMode
+        } else {
+            let legacyAllowExternal = defaults.object(forKey: Keys.allowExternalConnections) as? Bool ?? false
+            serverExposureMode = legacyAllowExternal ? .localNetwork : .localOnly
+        }
+        publicBaseURL = defaults.string(forKey: Keys.publicBaseURL) ?? ""
         requireApiKey = defaults.object(forKey: Keys.requireApiKey) as? Bool ?? false
-        apiKey = defaults.string(forKey: Keys.apiKey) ?? String(UUID().uuidString.prefix(16)).uppercased()
+        apiKey = defaults.string(forKey: Keys.apiKey) ?? Self.generatedAPIKey()
         defaultModelId = defaults.string(forKey: Keys.defaultModelId) ?? ""
+        powerAgentEnabled = defaults.object(forKey: Keys.powerAgentEnabled) as? Bool ?? true
+        agentRequireWriteApproval = defaults.object(forKey: Keys.agentRequireWriteApproval) as? Bool ?? true
+        agentGitHubToken = defaults.string(forKey: Keys.agentGitHubToken) ?? ""
+        agentGitHubClientID = defaults.string(forKey: Keys.agentGitHubClientID) ?? ""
+        agentGitHubRepository = defaults.string(forKey: Keys.agentGitHubRepository) ?? ""
+        agentDefaultWorkspaceID = defaults.string(forKey: Keys.agentDefaultWorkspaceID) ?? ""
+        agentGitHubDeviceCode = defaults.string(forKey: Keys.agentGitHubDeviceCode) ?? ""
+        agentGitHubUserCode = defaults.string(forKey: Keys.agentGitHubUserCode) ?? ""
+        agentGitHubVerificationURL = defaults.string(forKey: Keys.agentGitHubVerificationURL) ?? ""
+        if let timestamp = defaults.object(forKey: Keys.agentGitHubDeviceFlowExpiresAt) as? Double {
+            agentGitHubDeviceFlowExpiresAt = Date(timeIntervalSince1970: timestamp)
+        } else {
+            agentGitHubDeviceFlowExpiresAt = nil
+        }
+        agentBrowserHomeURL = defaults.string(forKey: Keys.agentBrowserHomeURL) ?? "https://github.com"
+        agentBrowserLastURL = defaults.string(forKey: Keys.agentBrowserLastURL) ?? ""
+        agentBundleExpertMode = defaults.object(forKey: Keys.agentBundleExpertMode) as? Bool ?? false
+        agentModelCapabilityOverrides = loadCodable([String: ModelAgentCapabilityOverride].self, for: Keys.agentModelCapabilityOverrides) ?? [:]
+
+        enforcePublicServerSecurity()
     }
 
     var localServerURL: String {
         "http://127.0.0.1:\(serverPort)"
     }
 
+    var allowExternalConnections: Bool {
+        serverExposureMode.allowsRemoteConnections
+    }
+
+    var normalizedPublicBaseURL: String? {
+        Self.sanitizedPublicBaseURL(from: publicBaseURL)
+    }
+
+    var publicServerURL: String {
+        normalizedPublicBaseURL ?? publicBaseURL.trimmedForLookup
+    }
+
+    var isAPIKeyRequiredForCurrentExposure: Bool {
+        serverExposureMode == .publicURL || requireApiKey
+    }
+
     var serverURL: String {
-        localServerURL
+        switch serverExposureMode {
+        case .publicURL:
+            return normalizedPublicBaseURL ?? localServerURL
+        case .localOnly, .localNetwork:
+            return localServerURL
+        }
+    }
+
+    var isGitHubAgentConfigured: Bool {
+        agentGitHubRepository.nonEmpty != nil
+    }
+
+    var hasPendingGitHubDeviceFlow: Bool {
+        agentGitHubDeviceCode.nonEmpty != nil &&
+        (agentGitHubDeviceFlowExpiresAt ?? .distantPast) > .now
+    }
+
+    func agentCapabilityOverride(for catalogId: String) -> ModelAgentCapabilityOverride? {
+        agentModelCapabilityOverrides[catalogId]
+    }
+
+    func setAgentCapabilityOverride(_ override: ModelAgentCapabilityOverride?, for catalogId: String) {
+        let normalizedCatalogId = catalogId.trimmedForLookup
+        guard !normalizedCatalogId.isEmpty else { return }
+
+        if let override, !override.isEmpty {
+            agentModelCapabilityOverrides[normalizedCatalogId] = override
+        } else {
+            agentModelCapabilityOverrides.removeValue(forKey: normalizedCatalogId)
+        }
     }
 
     func resetToDefaults() {
@@ -578,14 +1035,81 @@ final class AppSettings: ObservableObject {
 
         serverEnabled = false
         serverPort = 11434
-        allowExternalConnections = false
+        serverExposureMode = .localOnly
+        publicBaseURL = ""
         requireApiKey = false
-        apiKey = String(UUID().uuidString.prefix(16)).uppercased()
+        apiKey = Self.generatedAPIKey()
         defaultModelId = ""
+        powerAgentEnabled = true
+        agentRequireWriteApproval = true
+        agentGitHubToken = ""
+        agentGitHubClientID = ""
+        agentGitHubRepository = ""
+        agentDefaultWorkspaceID = ""
+        agentGitHubDeviceCode = ""
+        agentGitHubUserCode = ""
+        agentGitHubVerificationURL = ""
+        agentGitHubDeviceFlowExpiresAt = nil
+        agentBrowserHomeURL = "https://github.com"
+        agentBrowserLastURL = ""
+        agentBundleExpertMode = false
+        agentModelCapabilityOverrides = [:]
     }
 
     private func save(_ value: Any?, for key: String) {
         defaults.set(value, forKey: key)
+    }
+
+    private func saveCodable<T: Encodable>(_ value: T, for key: String) {
+        if let data = try? JSONEncoder().encode(value) {
+            defaults.set(data, forKey: key)
+        }
+    }
+
+    private func loadCodable<T: Decodable>(_ type: T.Type, for key: String) -> T? {
+        guard let data = defaults.data(forKey: key) else {
+            return nil
+        }
+
+        return try? JSONDecoder().decode(type, from: data)
+    }
+
+    private func enforcePublicServerSecurity() {
+        guard serverExposureMode == .publicURL else { return }
+
+        if publicBaseURL.trimmedForLookup.isEmpty {
+            save("", for: Keys.publicBaseURL)
+        }
+
+        if !requireApiKey {
+            requireApiKey = true
+        }
+
+        if apiKey.trimmedForLookup.isEmpty {
+            apiKey = Self.generatedAPIKey()
+        }
+    }
+
+    private static func generatedAPIKey() -> String {
+        String(UUID().uuidString.prefix(16)).uppercased()
+    }
+
+    private static func sanitizedPublicBaseURL(from rawValue: String) -> String? {
+        let trimmed = rawValue.trimmedForLookup
+        guard !trimmed.isEmpty else { return nil }
+
+        guard var components = URLComponents(string: trimmed),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              components.host?.nonEmpty != nil
+        else {
+            return nil
+        }
+
+        components.path = components.path == "/" ? "" : components.path
+        components.query = nil
+        components.fragment = nil
+        return components.string?.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 
     private enum Keys {
@@ -618,8 +1142,24 @@ final class AppSettings: ObservableObject {
         static let serverEnabled = "serverEnabled"
         static let serverPort = "serverPort"
         static let allowExternalConnections = "allowExternalConnections"
+        static let serverExposureMode = "serverExposureMode"
+        static let publicBaseURL = "publicBaseURL"
         static let requireApiKey = "requireApiKey"
         static let apiKey = "apiKey"
         static let defaultModelId = "defaultModelId"
+        static let powerAgentEnabled = "powerAgentEnabled"
+        static let agentRequireWriteApproval = "agentRequireWriteApproval"
+        static let agentGitHubToken = "agentGitHubToken"
+        static let agentGitHubClientID = "agentGitHubClientID"
+        static let agentGitHubRepository = "agentGitHubRepository"
+        static let agentDefaultWorkspaceID = "agentDefaultWorkspaceID"
+        static let agentGitHubDeviceCode = "agentGitHubDeviceCode"
+        static let agentGitHubUserCode = "agentGitHubUserCode"
+        static let agentGitHubVerificationURL = "agentGitHubVerificationURL"
+        static let agentGitHubDeviceFlowExpiresAt = "agentGitHubDeviceFlowExpiresAt"
+        static let agentBrowserHomeURL = "agentBrowserHomeURL"
+        static let agentBrowserLastURL = "agentBrowserLastURL"
+        static let agentBundleExpertMode = "agentBundleExpertMode"
+        static let agentModelCapabilityOverrides = "agentModelCapabilityOverrides"
     }
 }

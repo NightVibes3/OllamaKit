@@ -1,6 +1,10 @@
 import SwiftUI
 import SwiftData
 
+private let huggingFaceTokensURL = URL(string: "https://huggingface.co/settings/tokens")
+private let githubHomepageURL = URL(string: "https://github.com")
+private let huggingFaceHomepageURL = URL(string: "https://huggingface.co")
+
 struct SettingsView: View {
     @ObservedObject private var settings = AppSettings.shared
     @State private var showingResetConfirmation = false
@@ -34,6 +38,13 @@ struct SettingsView: View {
                         footer: "Required for accessing gated models and higher rate limits."
                     ) {
                         HuggingFaceSettingsSection(settings: settings)
+                    }
+
+                    SurfaceSectionCard(
+                        title: "Power Agent",
+                        footer: "Sideload-only coding agent controls. Reads run automatically; writes, deletes, restores, mirror refreshes, and GitHub pushes always pause for approval."
+                    ) {
+                        PowerAgentSettingsSection(settings: settings)
                     }
 
                     SurfaceSectionCard(title: "Interface") {
@@ -385,12 +396,14 @@ struct HuggingFaceTokenEditView: View {
             }
             
             Section {
-                Link(destination: URL(string: "https://huggingface.co/settings/tokens")!) {
-                    HStack {
-                        Text("Get Token")
-                        Spacer()
-                        Image(systemName: "arrow.up.right.square")
-                            .foregroundStyle(Color.accentColor)
+                if let huggingFaceTokensURL {
+                    Link(destination: huggingFaceTokensURL) {
+                        HStack {
+                            Text("Get Token")
+                            Spacer()
+                            Image(systemName: "arrow.up.right.square")
+                                .foregroundStyle(Color.accentColor)
+                        }
                     }
                 }
             }
@@ -411,6 +424,189 @@ struct HuggingFaceTokenEditView: View {
         }
         .onAppear {
             tempToken = token
+        }
+    }
+}
+
+struct PowerAgentSettingsSection: View {
+    @ObservedObject var settings: AppSettings
+    @State private var showingGitHubToken = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Toggle(isOn: $settings.powerAgentEnabled) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Enable Power Agent")
+                        .font(.system(size: 16, weight: .medium))
+                    Text("Turns on the side-loaded workspace mirror, agent tools, checkpoints, and agent APIs.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 12)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Approval Policy")
+                    .font(.system(size: 16, weight: .medium))
+                Text("Reads run automatically. File writes, restores, deletes, GitHub refreshes, and pushes always pause for approval in this build.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                Text("Per-model browser and coding tool overrides live in the Models tab.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.vertical, 12)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("GitHub Repository")
+                    .font(.system(size: 16, weight: .medium))
+                TextField("owner/repo", text: $settings.agentGitHubRepository)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.system(size: 14, design: .monospaced))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(.ultraThinMaterial)
+                    )
+                Text("Used for GitHub metadata, workflow reads, remote refreshes, and workspace pushes.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 12)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("GitHub OAuth Client ID")
+                    .font(.system(size: 16, weight: .medium))
+                TextField("Iv1.1234567890abcdef", text: $settings.agentGitHubClientID)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.system(size: 14, design: .monospaced))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(.ultraThinMaterial)
+                    )
+                Text("Used for GitHub device-flow login. Leave empty if you only want to use a personal access token.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                if settings.hasPendingGitHubDeviceFlow {
+                    Text("Pending device flow: code \(settings.agentGitHubUserCode) at \(settings.agentGitHubVerificationURL)")
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 12)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("GitHub Token")
+                        .font(.system(size: 16, weight: .medium))
+                    Spacer()
+                    Button {
+                        showingGitHubToken.toggle()
+                    } label: {
+                        Image(systemName: showingGitHubToken ? "eye.slash" : "eye")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                TextField(
+                    "github_pat_...",
+                    text: Binding(
+                        get: {
+                            showingGitHubToken
+                                ? settings.agentGitHubToken
+                                : String(repeating: "•", count: min(settings.agentGitHubToken.count, 24))
+                        },
+                        set: { newValue in
+                            if showingGitHubToken || newValue.contains("github_") || newValue.contains("ghp_") {
+                                settings.agentGitHubToken = newValue
+                            }
+                        }
+                    )
+                )
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .font(.system(size: 14, design: .monospaced))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(.ultraThinMaterial)
+                )
+
+                Text("Optional for public metadata reads. Required for GitHub pushes and private repositories.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 12)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Browser Home URL")
+                    .font(.system(size: 16, weight: .medium))
+                TextField("https://github.com", text: $settings.agentBrowserHomeURL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.system(size: 14, design: .monospaced))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(.ultraThinMaterial)
+                    )
+                Text("Default URL for the embedded browser tabs and browsing tools.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 12)
+
+            Divider()
+
+            Toggle(isOn: $settings.agentBundleExpertMode) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Expert Bundle Mode")
+                        .font(.system(size: 16, weight: .medium))
+                    Text("Only relevant on writable jailbreak-style installs. Allows broader live bundle resource edits, but still does not enable binary Mach-O rewriting.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 12)
+
+            Divider()
+
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Active Workspace")
+                        .font(.system(size: 16, weight: .medium))
+                    Text(settings.agentDefaultWorkspaceID.nonEmpty ?? "OllamaKit Mirror")
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                if let githubHomepageURL {
+                    Link(destination: githubHomepageURL) {
+                        Image(systemName: "arrow.up.right.square")
+                            .foregroundStyle(Color.accentColor)
+                    }
+                }
+            }
+            .padding(.vertical, 12)
         }
     }
 }
@@ -612,14 +808,18 @@ struct AboutSection: View {
                 .multilineTextAlignment(.center)
             
             HStack(spacing: 20) {
-                Link(destination: URL(string: "https://github.com")!) {
-                    Image(systemName: "link")
-                        .font(.system(size: 24))
+                if let githubHomepageURL {
+                    Link(destination: githubHomepageURL) {
+                        Image(systemName: "link")
+                            .font(.system(size: 24))
+                    }
                 }
                 
-                Link(destination: URL(string: "https://huggingface.co")!) {
-                    Image(systemName: "globe")
-                        .font(.system(size: 24))
+                if let huggingFaceHomepageURL {
+                    Link(destination: huggingFaceHomepageURL) {
+                        Image(systemName: "globe")
+                            .font(.system(size: 24))
+                    }
                 }
             }
             .foregroundStyle(Color.accentColor)

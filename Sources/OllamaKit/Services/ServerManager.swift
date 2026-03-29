@@ -2,6 +2,49 @@ import Foundation
 import Network
 import OllamaCore
 
+private func requestBodyData(from request: String) -> Data? {
+    guard let separatorRange = request.range(of: "\r\n\r\n") else {
+        return nil
+    }
+
+    let body = request[separatorRange.upperBound...]
+    return body.data(using: .utf8)
+}
+
+private struct ServerRequestContext: Sendable {
+    let requestID: String
+    let method: String
+    let path: String
+    let rawPath: String
+    let remoteAddress: String
+    let headers: [String: String]
+    let rawRequest: String
+    let startedAt: Date
+
+    var redactedRequestBody: String? {
+        guard let bodyData = requestBodyData(from: rawRequest),
+              let body = String(data: bodyData, encoding: .utf8)
+        else {
+            return nil
+        }
+
+        return ServerManager.redactedLogText(body)
+    }
+
+    var durationMilliseconds: Int {
+        Int(Date().timeIntervalSince(startedAt) * 1000)
+    }
+}
+
+private struct ParsedInferencePayload {
+    let prompt: String
+    let systemPrompt: String?
+    let conversationTurns: [ConversationTurn]
+    let tools: [InferenceToolDefinition]
+    let reasoning: InferenceReasoningOptions?
+    let stream: Bool
+}
+
 final class ServerManager {
     static let shared = ServerManager()
     private static let iso8601Formatter = ISO8601DateFormatter()
@@ -16,6 +59,80 @@ final class ServerManager {
     private var startupContinuation: CheckedContinuation<Void, Never>?
 
     private init() {}
+
+    private func log(
+        _ category: ServerLogCategory,
+        level: ServerLogLevel = .info,
+        title: String,
+        message: String,
+        requestID: String? = nil,
+        body: String? = nil,
+        metadata: [String: String] = [:]
+    ) {
+        let entry = ServerLogEntry(
+            level: level,
+            category: category,
+            title: title,
+            message: message,
+            requestID: requestID,
+            body: body.map { Self.redactedLogText($0) },
+            metadata: metadata
+        )
+
+        Task { @MainActor in
+            ServerLogStore.shared.record(entry)
+        }
+    }
+
+    private func logResponse(
+        status: Int,
+        body: String?,
+        context: ServerRequestContext?,
+        responseKind: String
+    ) {
+        var metadata = context.map { [
+            "method": $0.method,
+            "path": $0.path,
+            "remote": $0.remoteAddress,
+            "latency_ms": String($0.durationMilliseconds),
+            "response_kind": responseKind
+        ] } ?? [:]
+        metadata["status"] = String(status)
+        if let body {
+            metadata["body_bytes"] = String(body.lengthOfBytes(using: .utf8))
+        }
+
+        log(
+            .response,
+            level: status >= 400 ? .error : .info,
+            title: "HTTP \(status)",
+            message: "Responded with \(HTTPStatusText(status)).",
+            requestID: context?.requestID,
+            body: body,
+            metadata: metadata
+        )
+    }
+
+    fileprivate static func redactedLogText(_ value: String) -> String {
+        var redacted = value
+        redacted = redacted.replacingOccurrences(
+            of: #"(?im)^(Authorization:\s*Bearer)\s+.+$"#,
+            with: "$1 [REDACTED]",
+            options: .regularExpression
+        )
+        redacted = redacted.replacingOccurrences(
+            of: #"(?i)"(api[_-]?key|authorization)"\s*:\s*"[^"]+""#,
+            with: #""$1":"[REDACTED]""#,
+            options: .regularExpression
+        )
+
+        let currentAPIKey = AppSettings.shared.apiKey.trimmedForLookup
+        if !currentAPIKey.isEmpty {
+            redacted = redacted.replacingOccurrences(of: currentAPIKey, with: "[REDACTED]")
+        }
+
+        return redacted
+    }
 
     func startServerIfEnabled() async {
         guard AppSettings.shared.serverEnabled else { return }
@@ -39,9 +156,29 @@ final class ServerManager {
             stateLock.withLock {
                 isStarting = false
             }
-            print("Invalid server port: \(configuredPort)")
+            log(.listener, level: .error, title: "Invalid Port", message: "Server port \(configuredPort) is outside the supported range.")
             return
         }
+
+        if AppSettings.shared.serverExposureMode == .publicURL,
+           AppSettings.shared.normalizedPublicBaseURL == nil {
+            stateLock.withLock {
+                isStarting = false
+            }
+            log(.listener, level: .error, title: "Missing Public URL", message: "Public URL mode requires a valid external HTTP or HTTPS URL.")
+            return
+        }
+
+        log(
+            .listener,
+            title: "Starting Server",
+            message: "Starting API listener.",
+            metadata: [
+                "port": String(configuredPort),
+                "exposure_mode": AppSettings.shared.serverExposureMode.rawValue,
+                "canonical_url": AppSettings.shared.serverURL
+            ]
+        )
 
         do {
             let newListener = try NWListener(using: .tcp, on: port)
@@ -82,7 +219,7 @@ final class ServerManager {
             stateLock.withLock {
                 isStarting = false
             }
-            print("Failed to create listener: \(error)")
+            log(.listener, level: .error, title: "Listener Creation Failed", message: error.localizedDescription)
         }
     }
 
@@ -106,6 +243,7 @@ final class ServerManager {
         }
 
         state.2?.resume()
+        log(.listener, title: "Server Stopped", message: "The API listener was stopped.")
     }
 
     func restartServerIfRunning() async {
@@ -129,20 +267,30 @@ final class ServerManager {
                 isRunning = true
                 isStarting = false
             }
-            print("Server listening on port \(port)")
+            log(
+                .listener,
+                title: "Listener Ready",
+                message: "Server listening on port \(port.rawValue).",
+                metadata: [
+                    "port": String(port.rawValue),
+                    "exposure_mode": AppSettings.shared.serverExposureMode.rawValue,
+                    "canonical_url": AppSettings.shared.serverURL
+                ]
+            )
         case .failed(let error):
             stateLock.withLock {
                 isRunning = false
                 isStarting = false
                 listener = nil
             }
-            print("Server failed: \(error)")
+            log(.listener, level: .error, title: "Listener Failed", message: error.localizedDescription)
         case .cancelled:
             stateLock.withLock {
                 isRunning = false
                 isStarting = false
                 listener = nil
             }
+            log(.listener, title: "Listener Cancelled", message: "The server listener was cancelled.")
         default:
             break
         }
@@ -167,11 +315,26 @@ final class ServerManager {
 
         connection.start(queue: queue)
 
+        let remoteAddress = remoteAddress(for: connection)
+        log(.connection, title: "Connection Accepted", message: "Accepted inbound connection.", metadata: ["remote": remoteAddress])
+
         guard allowsConnection(connection) else {
             sendErrorResponse(
                 status: 403,
-                message: "External connections are disabled. Enable Allow External Connections to accept non-local requests.",
+                message: AppSettings.shared.serverExposureMode == .localOnly
+                    ? "This server is in Local Only mode. Switch to Local Network or Public URL mode to accept non-local requests."
+                    : "This connection is not allowed for the current server exposure mode.",
                 on: connection
+            )
+            log(
+                .connection,
+                level: .warning,
+                title: "Connection Rejected",
+                message: "Rejected connection due to exposure mode policy.",
+                metadata: [
+                    "remote": remoteAddress,
+                    "exposure_mode": AppSettings.shared.serverExposureMode.rawValue
+                ]
             )
             return
         }
@@ -180,7 +343,12 @@ final class ServerManager {
     }
 
     private func allowsConnection(_ connection: NWConnection) -> Bool {
-        guard !AppSettings.shared.allowExternalConnections else { return true }
+        switch AppSettings.shared.serverExposureMode {
+        case .localOnly:
+            break
+        case .localNetwork, .publicURL:
+            return true
+        }
 
         let endpoint = connection.currentPath?.remoteEndpoint ?? connection.endpoint
 
@@ -220,7 +388,8 @@ final class ServerManager {
                 return
             }
 
-            if error != nil {
+            if let error {
+                self.log(.connection, level: .warning, title: "Receive Failed", message: error.localizedDescription, metadata: ["remote": self.remoteAddress(for: connection)])
                 connection.cancel()
                 return
             }
@@ -243,6 +412,7 @@ final class ServerManager {
             }
 
             if isComplete {
+                self.log(.request, level: .warning, title: "Incomplete Request", message: "Connection closed before the request completed.", metadata: ["remote": self.remoteAddress(for: connection)])
                 self.sendErrorResponse(status: 400, message: "Bad Request", on: connection)
                 return
             }
@@ -268,212 +438,438 @@ final class ServerManager {
         let rawPath = parts[1]
         let path = rawPath.components(separatedBy: "?").first ?? rawPath
         let headers = parseHeaders(from: lines)
+        let context = ServerRequestContext(
+            requestID: UUID().uuidString.lowercased(),
+            method: method,
+            path: path,
+            rawPath: rawPath,
+            remoteAddress: remoteAddress(for: connection),
+            headers: headers,
+            rawRequest: request,
+            startedAt: .now
+        )
+
+        log(
+            .request,
+            title: "Incoming Request",
+            message: "\(method) \(path)",
+            requestID: context.requestID,
+            body: context.redactedRequestBody,
+            metadata: [
+                "remote": context.remoteAddress,
+                "path": path
+            ]
+        )
 
         if method == "OPTIONS" {
-            sendCORSPreflightResponse(on: connection)
+            sendCORSPreflightResponse(on: connection, context: context)
             return
         }
 
-        if AppSettings.shared.requireApiKey {
+        if AppSettings.shared.isAPIKeyRequiredForCurrentExposure {
             let authHeader = headers.first { $0.key.caseInsensitiveCompare("Authorization") == .orderedSame }?.value
             guard authHeader == "Bearer \(AppSettings.shared.apiKey)" else {
+                log(
+                    .auth,
+                    level: .warning,
+                    title: "Authentication Failed",
+                    message: "Rejected request without a valid API key.",
+                    requestID: context.requestID,
+                    metadata: [
+                        "path": path,
+                        "remote": context.remoteAddress
+                    ]
+                )
                 if path.hasPrefix("/v1/") {
-                    sendOpenAIErrorResponse(status: 401, message: "Unauthorized", type: "authentication_error", on: connection)
+                    sendOpenAIErrorResponse(status: 401, message: "Unauthorized", type: "authentication_error", on: connection, context: context)
                 } else {
-                    sendErrorResponse(status: 401, message: "Unauthorized", on: connection)
+                    sendErrorResponse(status: 401, message: "Unauthorized", on: connection, context: context)
                 }
                 return
             }
+
+            log(
+                .auth,
+                title: "Authentication Succeeded",
+                message: "Accepted authenticated request.",
+                requestID: context.requestID,
+                metadata: [
+                    "path": path,
+                    "remote": context.remoteAddress
+                ]
+            )
         }
 
+        log(
+            .routing,
+            title: "Dispatching Route",
+            message: "\(method) \(path)",
+            requestID: context.requestID,
+            metadata: [
+                "remote": context.remoteAddress,
+                "route": path,
+                "method": method
+            ]
+        )
+
         switch (method, path) {
+        case ("GET", "/api/agent/context"):
+            handleAgentContext(on: connection, context: context)
+        case ("GET", "/api/agent/tools"):
+            handleAgentTools(on: connection, context: context)
+        case ("GET", "/api/agent/workspaces"):
+            handleAgentWorkspaces(on: connection, context: context)
+        case ("GET", "/api/agent/checkpoints"):
+            handleAgentCheckpoints(on: connection, context: context)
+        case ("GET", "/api/agent/approvals"):
+            handleAgentApprovals(on: connection, context: context)
+        case ("POST", "/api/agent/execute"):
+            handleAgentExecute(request: request, on: connection, context: context)
+        case ("POST", "/api/agent/approvals/approve"):
+            handleAgentApprove(request: request, on: connection, context: context)
+        case ("POST", "/api/agent/approvals/reject"):
+            handleAgentReject(request: request, on: connection, context: context)
         case ("GET", "/api/tags"):
-            handleLegacyListModels(on: connection)
+            handleLegacyListModels(on: connection, context: context)
+        case ("POST", "/api/show"):
+            handleLegacyShow(request: request, on: connection, context: context)
         case ("POST", "/api/generate"):
-            handleLegacyGenerate(request: request, on: connection)
+            handleLegacyGenerate(request: request, on: connection, context: context)
         case ("POST", "/api/chat"):
-            handleLegacyChat(request: request, on: connection)
+            handleLegacyChat(request: request, on: connection, context: context)
         case ("POST", "/api/pull"):
-            handlePull(request: request, on: connection)
+            handlePull(request: request, on: connection, context: context)
         case ("DELETE", "/api/delete"):
-            handleDelete(request: request, on: connection)
+            handleDelete(request: request, on: connection, context: context)
         case ("POST", "/api/embed"):
-            sendErrorResponse(status: 501, message: "Embeddings are not implemented in this build.", on: connection)
+            handleLegacyEmbeddings(request: request, on: connection, context: context)
         case ("GET", "/api/ps"):
-            handleRunningModels(on: connection)
+            handleRunningModels(on: connection, context: context)
         case ("GET", "/v1/models"):
-            handleOpenAIListModels(on: connection)
+            handleOpenAIListModels(on: connection, context: context)
         case ("POST", "/v1/completions"):
-            handleOpenAICompletion(request: request, on: connection)
+            handleOpenAICompletion(request: request, on: connection, context: context)
         case ("POST", "/v1/chat/completions"):
-            handleOpenAIChatCompletion(request: request, on: connection)
+            handleOpenAIChatCompletion(request: request, on: connection, context: context)
         case ("POST", "/v1/embeddings"):
-            sendOpenAIErrorResponse(status: 501, message: "Embeddings are not implemented in this build.", type: "not_implemented_error", on: connection)
+            handleOpenAIEmbeddings(request: request, on: connection, context: context)
+        case ("POST", "/v1/responses"):
+            handleOpenAIResponses(request: request, on: connection, context: context)
         case ("GET", "/"):
             sendJSONResponse(
                 status: 200,
                 body: [
                     "status": "OllamaKit Server Running",
                     "ollama_compatible": true,
-                    "openai_compatible_routes": ["/v1/models", "/v1/completions", "/v1/chat/completions"]
+                    "openai_compatible_routes": ["/v1/models", "/v1/completions", "/v1/chat/completions", "/v1/responses"],
+                    "agent_routes": [
+                        "/api/agent/context",
+                        "/api/agent/tools",
+                        "/api/agent/workspaces",
+                        "/api/agent/checkpoints",
+                        "/api/agent/approvals",
+                        "/api/agent/execute",
+                        "/api/agent/approvals/approve",
+                        "/api/agent/approvals/reject"
+                    ],
+                    "canonical_url": AppSettings.shared.serverURL,
+                    "exposure_mode": AppSettings.shared.serverExposureMode.rawValue
                 ],
-                on: connection
+                on: connection,
+                context: context
             )
         default:
             if path.hasPrefix("/v1/") {
-                sendOpenAIErrorResponse(status: 404, message: "Not Found", type: "invalid_request_error", on: connection)
+                sendOpenAIErrorResponse(status: 404, message: "Not Found", type: "invalid_request_error", on: connection, context: context)
             } else {
-                sendErrorResponse(status: 404, message: "Not Found", on: connection)
+                sendErrorResponse(status: 404, message: "Not Found", on: connection, context: context)
             }
         }
     }
 
-    private func handleLegacyListModels(on connection: NWConnection) {
+    private func handleAgentContext(on connection: NWConnection, context: ServerRequestContext) {
         Task {
-            let models = await serverModels()
-            let body: [String: Any] = [
-                "models": models.map { snapshot in
-                    let identifier = legacyModelName(for: snapshot)
-                    return [
-                        "name": identifier,
-                        "model": identifier,
-                        "size": snapshot.size,
-                        "modified_at": iso8601String(from: snapshot.downloadDate),
-                        "details": [
-                            "parameter_size": snapshot.parameters,
-                            "quantization_level": snapshot.quantization
-                        ]
-                    ]
-                }
-            ]
-
-            sendJSONResponse(status: 200, body: body, on: connection)
+            let result = await AgentToolRuntime.shared.execute(toolID: "workspace.context", arguments: .object([:]))
+            sendAgentExecutionResponse(result, on: connection, context: context)
         }
     }
 
-    private func handleOpenAIListModels(on connection: NWConnection) {
+    private func handleAgentTools(on connection: NWConnection, context: ServerRequestContext) {
+        Task { @MainActor in
+            let activeModel = ModelRunner.shared.activeCatalogId.flatMap { ModelStorage.shared.snapshot(name: $0) }
+                ?? AppSettings.shared.defaultModelId.nonEmpty.flatMap { ModelStorage.shared.snapshot(name: $0) }
+            let tools = AgentToolRuntime.shared.toolDescriptors(for: activeModel).map(agentToolPayload)
+            sendJSONResponse(
+                status: 200,
+                body: [
+                    "tools": tools,
+                    "active_workspace_id": AgentWorkspaceManager.shared.activeWorkspaceID,
+                    "active_model_id": activeModel?.catalogId ?? "",
+                    "active_model_name": activeModel?.displayName ?? ""
+                ],
+                on: connection,
+                context: context
+            )
+        }
+    }
+
+    private func handleAgentWorkspaces(on connection: NWConnection, context: ServerRequestContext) {
+        AgentWorkspaceManager.shared.bootstrapIfNeeded()
+        sendJSONResponse(
+            status: 200,
+            body: [
+                "active_workspace_id": AgentWorkspaceManager.shared.activeWorkspaceID,
+                "workspaces": AgentWorkspaceManager.shared.workspaces.map(agentWorkspacePayload)
+            ],
+            on: connection,
+            context: context
+        )
+    }
+
+    private func handleAgentCheckpoints(on connection: NWConnection, context: ServerRequestContext) {
+        let checkpoints = AgentWorkspaceManager.shared
+            .checkpointRecords()
+            .map(agentCheckpointPayload)
+        sendJSONResponse(
+            status: 200,
+            body: [
+                "active_workspace_id": AgentWorkspaceManager.shared.activeWorkspaceID,
+                "checkpoints": checkpoints
+            ],
+            on: connection,
+            context: context
+        )
+    }
+
+    private func handleAgentApprovals(on connection: NWConnection, context: ServerRequestContext) {
+        sendJSONResponse(
+            status: 200,
+            body: [
+                "pending": AgentApprovalCenter.shared.requests.map(agentApprovalPayload)
+            ],
+            on: connection,
+            context: context
+        )
+    }
+
+    private func handleAgentExecute(request: String, on connection: NWConnection, context: ServerRequestContext) {
+        guard let json = decodeJSONObject(from: request) else {
+            sendErrorResponse(status: 400, message: "Invalid request", on: connection, context: context)
+            return
+        }
+
+        guard let toolID = ((json["tool"] as? String) ?? (json["tool_id"] as? String))?.trimmedForLookup.nonEmpty else {
+            sendErrorResponse(status: 400, message: "Missing tool identifier", on: connection, context: context)
+            return
+        }
+
+        var argumentsObject = (AgentJSONValue.fromFoundation(json["arguments"]) ?? .object([:])).objectValue ?? [:]
+        if argumentsObject["model_id"] == nil, let topLevelModel = (json["model_id"] as? String) ?? (json["model"] as? String) {
+            argumentsObject["model_id"] = .string(topLevelModel)
+        }
+        let arguments = AgentJSONValue.object(argumentsObject)
+
+        Task {
+            let result = await AgentToolRuntime.shared.execute(toolID: toolID, arguments: arguments)
+            sendAgentExecutionResponse(result, on: connection, context: context)
+        }
+    }
+
+    private func handleAgentApprove(request: String, on connection: NWConnection, context: ServerRequestContext) {
+        guard
+            let json = decodeJSONObject(from: request),
+            let requestIDString = ((json["request_id"] as? String) ?? (json["id"] as? String))?.trimmedForLookup.nonEmpty,
+            let requestID = UUID(uuidString: requestIDString)
+        else {
+            sendErrorResponse(status: 400, message: "Missing request_id", on: connection, context: context)
+            return
+        }
+
+        Task {
+            let result = await AgentToolRuntime.shared.approve(requestID: requestID)
+            sendAgentExecutionResponse(result, on: connection, context: context)
+        }
+    }
+
+    private func handleAgentReject(request: String, on connection: NWConnection, context: ServerRequestContext) {
+        guard
+            let json = decodeJSONObject(from: request),
+            let requestIDString = ((json["request_id"] as? String) ?? (json["id"] as? String))?.trimmedForLookup.nonEmpty,
+            let requestID = UUID(uuidString: requestIDString)
+        else {
+            sendErrorResponse(status: 400, message: "Missing request_id", on: connection, context: context)
+            return
+        }
+
+        let result = AgentToolRuntime.shared.reject(requestID: requestID)
+        sendAgentExecutionResponse(result, on: connection, context: context)
+    }
+
+    private func handleLegacyListModels(on connection: NWConnection, context: ServerRequestContext) {
+        Task {
+            let models = await serverModels()
+            let body: [String: Any] = [
+                "models": models.map { legacyModelMetadata(for: $0) }
+            ]
+
+            sendJSONResponse(status: 200, body: body, on: connection, context: context)
+        }
+    }
+
+    private func handleOpenAIListModels(on connection: NWConnection, context: ServerRequestContext) {
         Task {
             let models = await serverModels()
             let createdAt = Int(Date().timeIntervalSince1970)
             let body: [String: Any] = [
                 "object": "list",
-                "data": models.map { snapshot in
-                    [
-                        "id": openAIModelIdentifier(for: snapshot),
-                        "object": "model",
-                        "created": createdAt,
-                        "owned_by": "local"
-                    ]
-                }
+                "data": models.map { openAIModelMetadata(for: $0, createdAt: createdAt) }
             ]
 
-            sendJSONResponse(status: 200, body: body, on: connection)
+            sendJSONResponse(status: 200, body: body, on: connection, context: context)
         }
     }
 
-    private func handleLegacyGenerate(request: String, on connection: NWConnection) {
+    private func handleLegacyShow(request: String, on connection: NWConnection, context: ServerRequestContext) {
+        guard
+            let json = decodeJSONObject(from: request),
+            let modelName = (json["name"] as? String)?.trimmedForLookup.nonEmpty
+        else {
+            sendErrorResponse(status: 400, message: "Invalid request", on: connection, context: context)
+            return
+        }
+
+        Task {
+            guard let snapshot = await resolvedServerModel(named: modelName) else {
+                sendErrorResponse(status: 404, message: "Model not found", on: connection, context: context)
+                return
+            }
+
+            let body: [String: Any] = [
+                "name": legacyModelName(for: snapshot),
+                "model": legacyModelName(for: snapshot),
+                "backend": snapshot.backendKind.rawValue,
+                "size": snapshot.size,
+                "modified_at": iso8601String(from: snapshot.downloadDate),
+                "validation": validationPayload(for: snapshot),
+                "capabilities": capabilityPayload(for: snapshot),
+                "supported_routes": snapshot.effectiveServerCapabilities.supportedRoutes.map(\.rawValue),
+                "details": [
+                    "parameter_size": snapshot.parameters,
+                    "quantization_level": snapshot.quantization,
+                    "context_length": snapshot.contextLength
+                ]
+            ]
+
+            sendJSONResponse(status: 200, body: body, on: connection, context: context)
+        }
+    }
+
+    private func handleLegacyGenerate(request: String, on connection: NWConnection, context: ServerRequestContext) {
         guard
             let json = decodeJSONObject(from: request),
             let modelName = json["model"] as? String
         else {
-            sendErrorResponse(status: 400, message: "Invalid request", on: connection)
+            sendErrorResponse(status: 400, message: "Invalid request", on: connection, context: context)
             return
         }
 
-        let prompt = extractStringContent(from: json["prompt"]) ?? ""
-        let systemPrompt = extractStringContent(from: json["system"])
-        let stream = json["stream"] as? Bool ?? true
+        let payload = ParsedInferencePayload(
+            prompt: extractStringContent(from: json["prompt"]) ?? "",
+            systemPrompt: extractStringContent(from: json["system"]),
+            conversationTurns: [],
+            tools: parseTools(from: json),
+            reasoning: parseReasoning(from: json),
+            stream: json["stream"] as? Bool ?? true
+        )
 
         Task {
             do {
-                let model = try await prepareModel(named: modelName)
+                let model = try await prepareModel(
+                    named: modelName,
+                    requiredRoute: .apiGenerate,
+                    payload: payload,
+                    context: context
+                )
                 let parameters = modelParameters(from: json, apiStyle: .ollama)
 
-                if stream {
+                if payload.stream {
                     await streamLegacyGenerate(
-                        prompt: prompt,
-                        systemPrompt: systemPrompt,
+                        prompt: payload.prompt,
+                        systemPrompt: payload.systemPrompt,
                         model: legacyModelName(for: model),
                         parameters: parameters,
-                        on: connection
+                        on: connection,
+                        context: context
                     )
                 } else {
                     await completeLegacyGenerate(
-                        prompt: prompt,
-                        systemPrompt: systemPrompt,
+                        prompt: payload.prompt,
+                        systemPrompt: payload.systemPrompt,
                         model: legacyModelName(for: model),
                         parameters: parameters,
-                        on: connection
+                        on: connection,
+                        context: context
                     )
                 }
             } catch {
-                sendErrorResponse(status: httpStatus(for: error), message: error.localizedDescription, on: connection)
+                sendErrorResponse(status: httpStatus(for: error), message: error.localizedDescription, on: connection, context: context)
             }
         }
     }
 
-    private func handleLegacyChat(request: String, on connection: NWConnection) {
+    private func handleLegacyChat(request: String, on connection: NWConnection, context: ServerRequestContext) {
         guard
             let json = decodeJSONObject(from: request),
             let messages = json["messages"] as? [[String: Any]],
             let modelName = json["model"] as? String
         else {
-            sendErrorResponse(status: 400, message: "Invalid request", on: connection)
+            sendErrorResponse(status: 400, message: "Invalid request", on: connection, context: context)
             return
         }
 
-        let systemPrompt = messages
-            .filter { isInstructionRole($0["role"] as? String) }
-            .compactMap { extractStringContent(from: $0["content"]) }
-            .joined(separator: "\n\n")
-
-        let conversationTurns = messages.compactMap { message -> ConversationTurn? in
-            guard let role = message["role"] as? String,
-                  !isInstructionRole(role),
-                  let content = extractStringContent(from: message["content"])
-            else {
-                return nil
-            }
-
-            return ConversationTurn(role: role, content: content)
-        }
-
-        let stream = json["stream"] as? Bool ?? true
+        let payload = parseChatPayload(messages: messages, json: json, defaultStream: true)
 
         Task {
             do {
-                let model = try await prepareModel(named: modelName)
+                let model = try await prepareModel(
+                    named: modelName,
+                    requiredRoute: .apiChat,
+                    payload: payload,
+                    context: context
+                )
                 let parameters = modelParameters(from: json, apiStyle: .ollama)
 
-                if stream {
+                if payload.stream {
                     await streamLegacyChat(
-                        conversationTurns: conversationTurns,
-                        systemPrompt: systemPrompt.nonEmpty,
+                        conversationTurns: payload.conversationTurns,
+                        systemPrompt: payload.systemPrompt,
                         model: legacyModelName(for: model),
                         parameters: parameters,
-                        on: connection
+                        on: connection,
+                        context: context
                     )
                 } else {
                     await completeLegacyChat(
-                        conversationTurns: conversationTurns,
-                        systemPrompt: systemPrompt.nonEmpty,
+                        conversationTurns: payload.conversationTurns,
+                        systemPrompt: payload.systemPrompt,
                         model: legacyModelName(for: model),
                         parameters: parameters,
-                        on: connection
+                        on: connection,
+                        context: context
                     )
                 }
             } catch {
-                sendErrorResponse(status: httpStatus(for: error), message: error.localizedDescription, on: connection)
+                sendErrorResponse(status: httpStatus(for: error), message: error.localizedDescription, on: connection, context: context)
             }
         }
     }
 
-    private func handleOpenAICompletion(request: String, on connection: NWConnection) {
+    private func handleOpenAICompletion(request: String, on connection: NWConnection, context: ServerRequestContext) {
         guard
             let json = decodeJSONObject(from: request),
             let modelName = json["model"] as? String
         else {
-            sendOpenAIErrorResponse(status: 400, message: "Invalid request", on: connection)
+            sendOpenAIErrorResponse(status: 400, message: "Invalid request", on: connection, context: context)
             return
         }
 
@@ -486,109 +882,242 @@ final class ServerManager {
             prompt = ""
         }
 
-        let stream = json["stream"] as? Bool ?? false
+        let payload = ParsedInferencePayload(
+            prompt: prompt,
+            systemPrompt: extractStringContent(from: json["system"]),
+            conversationTurns: [],
+            tools: parseTools(from: json),
+            reasoning: parseReasoning(from: json),
+            stream: json["stream"] as? Bool ?? false
+        )
 
         Task {
             do {
-                let model = try await prepareModel(named: modelName)
+                let model = try await prepareModel(
+                    named: modelName,
+                    requiredRoute: .v1Completions,
+                    payload: payload,
+                    context: context
+                )
                 let parameters = modelParameters(from: json, apiStyle: .openAI)
                 let requestId = "cmpl-\(UUID().uuidString.lowercased())"
                 let createdAt = Int(Date().timeIntervalSince1970)
                 let responseModel = openAIModelIdentifier(for: model)
 
-                if stream {
+                if payload.stream {
                     await streamOpenAICompletion(
                         requestId: requestId,
                         createdAt: createdAt,
                         model: responseModel,
-                        prompt: prompt,
+                        prompt: payload.prompt,
                         parameters: parameters,
-                        on: connection
+                        on: connection,
+                        context: context
                     )
                 } else {
                     await completeOpenAICompletion(
                         requestId: requestId,
                         createdAt: createdAt,
                         model: responseModel,
-                        prompt: prompt,
+                        prompt: payload.prompt,
                         parameters: parameters,
-                        on: connection
+                        on: connection,
+                        context: context
                     )
                 }
             } catch {
                 let status = httpStatus(for: error)
-                sendOpenAIErrorResponse(status: status, message: error.localizedDescription, type: openAIErrorType(for: status), on: connection)
+                sendOpenAIErrorResponse(status: status, message: error.localizedDescription, type: openAIErrorType(for: status), on: connection, context: context)
             }
         }
     }
 
-    private func handleOpenAIChatCompletion(request: String, on connection: NWConnection) {
+    private func handleOpenAIChatCompletion(request: String, on connection: NWConnection, context: ServerRequestContext) {
         guard
             let json = decodeJSONObject(from: request),
             let messages = json["messages"] as? [[String: Any]],
             let modelName = json["model"] as? String
         else {
-            sendOpenAIErrorResponse(status: 400, message: "Invalid request", on: connection)
+            sendOpenAIErrorResponse(status: 400, message: "Invalid request", on: connection, context: context)
             return
         }
 
-        let systemPrompt = messages
-            .filter { isInstructionRole($0["role"] as? String) }
-            .compactMap { extractStringContent(from: $0["content"]) }
-            .joined(separator: "\n\n")
-
-        let conversationTurns = messages.compactMap { message -> ConversationTurn? in
-            guard let role = message["role"] as? String,
-                  !isInstructionRole(role),
-                  let content = extractStringContent(from: message["content"])
-            else {
-                return nil
-            }
-
-            return ConversationTurn(role: role, content: content)
-        }
-
-        let stream = json["stream"] as? Bool ?? false
+        let payload = parseChatPayload(messages: messages, json: json, defaultStream: false)
 
         Task {
             do {
-                let model = try await prepareModel(named: modelName)
+                let model = try await prepareModel(
+                    named: modelName,
+                    requiredRoute: .v1ChatCompletions,
+                    payload: payload,
+                    context: context
+                )
                 let parameters = modelParameters(from: json, apiStyle: .openAI)
                 let requestId = "chatcmpl-\(UUID().uuidString.lowercased())"
                 let createdAt = Int(Date().timeIntervalSince1970)
                 let responseModel = openAIModelIdentifier(for: model)
 
-                if stream {
+                if payload.stream {
                     await streamOpenAIChatCompletion(
                         requestId: requestId,
                         createdAt: createdAt,
                         model: responseModel,
-                        conversationTurns: conversationTurns,
-                        systemPrompt: systemPrompt.nonEmpty,
+                        conversationTurns: payload.conversationTurns,
+                        systemPrompt: payload.systemPrompt,
                         parameters: parameters,
-                        on: connection
+                        on: connection,
+                        context: context
                     )
                 } else {
                     await completeOpenAIChatCompletion(
                         requestId: requestId,
                         createdAt: createdAt,
                         model: responseModel,
-                        conversationTurns: conversationTurns,
-                        systemPrompt: systemPrompt.nonEmpty,
+                        conversationTurns: payload.conversationTurns,
+                        systemPrompt: payload.systemPrompt,
                         parameters: parameters,
-                        on: connection
+                        on: connection,
+                        context: context
                     )
                 }
             } catch {
                 let status = httpStatus(for: error)
-                sendOpenAIErrorResponse(status: status, message: error.localizedDescription, type: openAIErrorType(for: status), on: connection)
+                sendOpenAIErrorResponse(status: status, message: error.localizedDescription, type: openAIErrorType(for: status), on: connection, context: context)
             }
         }
     }
 
-    private func handlePull(request: String, on connection: NWConnection) {
+    private func handleLegacyEmbeddings(request: String, on connection: NWConnection, context: ServerRequestContext) {
+        guard
+            let json = decodeJSONObject(from: request),
+            let modelName = json["model"] as? String
+        else {
+            sendErrorResponse(status: 400, message: "Invalid request", on: connection, context: context)
+            return
+        }
+
+        Task {
+            do {
+                let payload = ParsedInferencePayload(
+                    prompt: "",
+                    systemPrompt: nil,
+                    conversationTurns: [],
+                    tools: [],
+                    reasoning: nil,
+                    stream: false
+                )
+                _ = try await prepareModel(
+                    named: modelName,
+                    requiredRoute: .apiEmbed,
+                    payload: payload,
+                    context: context
+                )
+                sendErrorResponse(
+                    status: 501,
+                    message: "Embeddings are not implemented in this build for this model yet.",
+                    on: connection,
+                    context: context
+                )
+            } catch {
+                sendErrorResponse(status: httpStatus(for: error), message: error.localizedDescription, on: connection, context: context)
+            }
+        }
+    }
+
+    private func handleOpenAIEmbeddings(request: String, on connection: NWConnection, context: ServerRequestContext) {
+        guard
+            let json = decodeJSONObject(from: request),
+            let modelName = json["model"] as? String
+        else {
+            sendOpenAIErrorResponse(status: 400, message: "Invalid request", on: connection, context: context)
+            return
+        }
+
+        Task {
+            do {
+                let payload = ParsedInferencePayload(
+                    prompt: "",
+                    systemPrompt: nil,
+                    conversationTurns: [],
+                    tools: [],
+                    reasoning: nil,
+                    stream: false
+                )
+                _ = try await prepareModel(
+                    named: modelName,
+                    requiredRoute: .v1Embeddings,
+                    payload: payload,
+                    context: context
+                )
+                sendOpenAIErrorResponse(
+                    status: 501,
+                    message: "Embeddings are not implemented in this build for this model yet.",
+                    type: "not_implemented_error",
+                    on: connection,
+                    context: context
+                )
+            } catch {
+                let status = httpStatus(for: error)
+                sendOpenAIErrorResponse(status: status, message: error.localizedDescription, type: openAIErrorType(for: status), on: connection, context: context)
+            }
+        }
+    }
+
+    private func handleOpenAIResponses(request: String, on connection: NWConnection, context: ServerRequestContext) {
+        guard
+            let json = decodeJSONObject(from: request),
+            let modelName = json["model"] as? String
+        else {
+            sendOpenAIErrorResponse(status: 400, message: "Invalid request", on: connection, context: context)
+            return
+        }
+
+        let payload = parseResponsesPayload(from: json)
+
+        Task {
+            do {
+                let model = try await prepareModel(
+                    named: modelName,
+                    requiredRoute: .v1Responses,
+                    payload: payload,
+                    context: context
+                )
+                let parameters = modelParameters(from: json, apiStyle: .openAI)
+                let requestId = "resp-\(UUID().uuidString.lowercased())"
+                let createdAt = Int(Date().timeIntervalSince1970)
+                let responseModel = openAIModelIdentifier(for: model)
+
+                if payload.stream {
+                    await streamOpenAIResponses(
+                        requestId: requestId,
+                        createdAt: createdAt,
+                        model: responseModel,
+                        payload: payload,
+                        parameters: parameters,
+                        on: connection,
+                        context: context
+                    )
+                } else {
+                    await completeOpenAIResponses(
+                        requestId: requestId,
+                        createdAt: createdAt,
+                        model: responseModel,
+                        payload: payload,
+                        parameters: parameters,
+                        on: connection,
+                        context: context
+                    )
+                }
+            } catch {
+                let status = httpStatus(for: error)
+                sendOpenAIErrorResponse(status: status, message: error.localizedDescription, type: openAIErrorType(for: status), on: connection, context: context)
+            }
+        }
+    }
+
+    private func handlePull(request: String, on connection: NWConnection, context: ServerRequestContext) {
         guard let json = decodeJSONObject(from: request) else {
-            sendErrorResponse(status: 400, message: "Invalid request", on: connection)
+            sendErrorResponse(status: 400, message: "Invalid request", on: connection, context: context)
             return
         }
 
@@ -598,13 +1127,25 @@ final class ServerManager {
         let stream = json["stream"] as? Bool ?? true
 
         guard !requestedName.isEmpty else {
-            sendPullError(stream: stream, status: 400, message: "Missing model name", on: connection)
+            sendPullError(stream: stream, status: 400, message: "Missing model name", on: connection, context: context)
             return
         }
 
         Task {
+            log(
+                .model,
+                title: "Pull Requested",
+                message: "Starting model pull request.",
+                requestID: context.requestID,
+                metadata: [
+                    "requested_model": requestedName,
+                    "requested_file": requestedFilename ?? "",
+                    "stream": String(stream)
+                ]
+            )
+
             if stream {
-                sendStreamHeaders(contentType: "application/x-ndjson", on: connection)
+                sendStreamHeaders(contentType: "application/x-ndjson", on: connection, context: context)
                 sendNDJSONChunk(
                     data: [
                         "status": "pulling",
@@ -612,70 +1153,140 @@ final class ServerManager {
                         "done": false
                     ],
                     on: connection,
-                    closeAfterSend: false
+                    closeAfterSend: false,
+                    context: context
                 )
             }
 
             do {
-                let modelId = try await resolvePullModelID(from: requestedName)
-                let files = try await HuggingFaceService.shared.getModelFiles(modelId: modelId)
+                let runtimeProfile = await DeviceCapabilityService.shared.currentRuntimeProfile()
+                let candidate = try await HuggingFaceService.shared.resolvePullCandidate(
+                    requestedName: requestedName,
+                    requestedFilename: requestedFilename,
+                    runtimeProfile: runtimeProfile
+                )
+                let modelId = candidate.model.modelId
+                let file = candidate.file
 
-                guard !files.isEmpty else {
-                    if stream {
-                        sendNDJSONChunk(
-                            data: [
-                                "error": "No GGUF files found for \(modelId).",
-                                "done": true
-                            ],
-                            on: connection,
-                            closeAfterSend: true
-                        )
-                    } else {
-                        sendErrorResponse(status: 404, message: "No GGUF files found for \(modelId).", on: connection)
-                    }
-                    return
-                }
-
-                let file = selectFile(for: requestedFilename, from: files)
-                guard let file else {
-                    if stream {
-                        sendNDJSONChunk(
-                            data: [
-                                "error": "Requested GGUF file was not found for \(modelId).",
-                                "done": true
-                            ],
-                            on: connection,
-                            closeAfterSend: true
-                        )
-                    } else {
-                        sendErrorResponse(status: 404, message: "Requested GGUF file was not found for \(modelId).", on: connection)
-                    }
-                    return
-                }
+                log(
+                    .model,
+                    title: "Pull Candidate Resolved",
+                    message: "Resolved a downloadable model candidate.",
+                    requestID: context.requestID,
+                    metadata: [
+                        "model_id": modelId,
+                        "file": file.filename,
+                        "url": file.url.absoluteString
+                    ]
+                )
 
                 let downloadedModel = try await HuggingFaceService.shared.downloadModel(
                     from: file.url,
                     filename: file.filename,
                     modelId: modelId
-                ) { _ in }
+                ) { progress in
+                    guard progress.downloadedBytes > 0 || progress.totalBytes > 0 else { return }
 
-                await ModelStorage.shared.upsertDownloadedModel(downloadedModel.registrySeed)
+                    if stream {
+                        self.sendNDJSONChunk(
+                            data: [
+                                "status": "downloading",
+                                "model": requestedName,
+                                "completed": progress.downloadedBytes,
+                                "total": progress.totalBytes,
+                                "progress": progress.progress,
+                                "done": false
+                            ],
+                            on: connection,
+                            closeAfterSend: false,
+                            context: context
+                        )
+                    }
+                }
 
+                await ModelStorage.shared.upsertDownloadedModel(
+                    DownloadedModelSeed(
+                        modelId: downloadedModel.registrySeed.modelId,
+                        name: downloadedModel.registrySeed.name,
+                        localPath: downloadedModel.registrySeed.localPath,
+                        size: downloadedModel.registrySeed.size,
+                        quantization: downloadedModel.registrySeed.quantization,
+                        parameters: downloadedModel.registrySeed.parameters,
+                        contextLength: downloadedModel.registrySeed.contextLength,
+                        serverCapabilities: ServerModelCapabilities.conservativeDefaults(
+                            backendKind: .ggufLlama,
+                            sourceModelID: modelId,
+                            displayName: downloadedModel.registrySeed.name,
+                            capabilitySummary: ModelCapabilitySummary(
+                                sizeBytes: downloadedModel.registrySeed.size,
+                                quantization: downloadedModel.registrySeed.quantization,
+                                parameterCountLabel: downloadedModel.registrySeed.parameters,
+                                contextLength: downloadedModel.registrySeed.contextLength,
+                                supportsStreaming: true,
+                                notes: [
+                                    candidate.model.pipelineTag,
+                                    candidate.model.description,
+                                    candidate.model.tags?.joined(separator: " ")
+                                ]
+                                .compactMap { note in
+                                    guard let note = note?.trimmedForLookup.nonEmpty else { return nil }
+                                    return note
+                                }
+                                .joined(separator: " ")
+                                .nonEmpty
+                            ),
+                            hintedMultilingual: candidate.model.tags?.contains(where: {
+                                $0.localizedCaseInsensitiveContains("multilingual")
+                            }) ?? false
+                        )
+                    )
+                )
+                let snapshot = await ModelStorage.shared.snapshot(name: downloadedModel.apiIdentifier)
+
+                let validationStatus = snapshot?.effectiveValidationStatus ?? .unknown
                 let finalBody: [String: Any] = [
-                    "status": "success",
+                    "status": validationStatus == .validated ? "success" : "validation_failed",
                     "model": downloadedModel.apiIdentifier,
                     "file": file.filename,
                     "size": downloadedModel.size,
                     "completed": downloadedModel.size,
+                    "validation_status": validationStatus.rawValue,
+                    "validation_message": snapshot?.validationSummary ?? "",
                     "done": true
                 ]
 
+                log(
+                    .model,
+                    level: validationStatus == .validated ? .info : .warning,
+                    title: "Pull Completed",
+                    message: validationStatus == .validated
+                        ? "Downloaded model validated successfully."
+                        : "Downloaded model finished, but validation did not pass.",
+                    requestID: context.requestID,
+                    metadata: [
+                        "model": downloadedModel.apiIdentifier,
+                        "file": file.filename,
+                        "validation_status": validationStatus.rawValue
+                    ]
+                )
+
                 if stream {
-                    sendNDJSONChunk(data: finalBody, on: connection, closeAfterSend: true)
+                    sendNDJSONChunk(data: finalBody, on: connection, closeAfterSend: true, context: context)
                 } else {
-                    sendJSONResponse(status: 200, body: finalBody, on: connection)
+                    sendJSONResponse(status: 200, body: finalBody, on: connection, context: context)
                 }
             } catch {
+                log(
+                    .error,
+                    level: .error,
+                    title: "Pull Failed",
+                    message: error.localizedDescription,
+                    requestID: context.requestID,
+                    metadata: [
+                        "requested_model": requestedName,
+                        "requested_file": requestedFilename ?? ""
+                    ]
+                )
                 if stream {
                     sendNDJSONChunk(
                         data: [
@@ -683,21 +1294,22 @@ final class ServerManager {
                             "done": true
                         ],
                         on: connection,
-                        closeAfterSend: true
+                        closeAfterSend: true,
+                        context: context
                     )
                 } else {
-                    sendErrorResponse(status: httpStatus(for: error), message: error.localizedDescription, on: connection)
+                    sendErrorResponse(status: httpStatus(for: error), message: error.localizedDescription, on: connection, context: context)
                 }
             }
         }
     }
 
-    private func handleDelete(request: String, on connection: NWConnection) {
+    private func handleDelete(request: String, on connection: NWConnection, context: ServerRequestContext) {
         guard
             let json = decodeJSONObject(from: request),
             let modelName = json["name"] as? String
         else {
-            sendErrorResponse(status: 400, message: "Invalid request", on: connection)
+            sendErrorResponse(status: 400, message: "Invalid request", on: connection, context: context)
             return
         }
 
@@ -705,14 +1317,16 @@ final class ServerManager {
             let didDelete = await ModelStorage.shared.deleteModel(name: modelName)
 
             if didDelete {
-                sendJSONResponse(status: 200, body: [:], on: connection)
+                log(.model, title: "Model Deleted", message: "Deleted installed model.", requestID: context.requestID, metadata: ["model": modelName])
+                sendJSONResponse(status: 200, body: [:], on: connection, context: context)
             } else {
-                sendErrorResponse(status: 404, message: "Model not found", on: connection)
+                log(.model, level: .warning, title: "Delete Failed", message: "Model not found for deletion.", requestID: context.requestID, metadata: ["model": modelName])
+                sendErrorResponse(status: 404, message: "Model not found", on: connection, context: context)
             }
         }
     }
 
-    private func handleRunningModels(on connection: NWConnection) {
+    private func handleRunningModels(on connection: NWConnection, context: ServerRequestContext) {
         Task {
             let models: [[String: Any]]
 
@@ -734,24 +1348,83 @@ final class ServerManager {
                 models = []
             }
 
-            sendJSONResponse(status: 200, body: ["models": models], on: connection)
+            sendJSONResponse(status: 200, body: ["models": models], on: connection, context: context)
         }
     }
 
-    private func prepareModel(named modelName: String) async throws -> ModelSnapshot {
-        guard let model = await serverModel(named: modelName) else {
-            throw NSError(domain: "ServerManager", code: 404, userInfo: [NSLocalizedDescriptionKey: "Model not found"])
+    private func prepareModel(
+        named modelName: String,
+        requiredRoute: ServerSupportedRoute,
+        payload: ParsedInferencePayload,
+        context: ServerRequestContext
+    ) async throws -> ModelSnapshot {
+        guard let model = await resolvedServerModel(named: modelName) else {
+            log(.model, level: .warning, title: "Model Not Found", message: "Requested model could not be resolved.", requestID: context.requestID, metadata: ["requested_model": modelName, "route": requiredRoute.rawValue])
+            throw NSError(domain: "ServerManager", code: 404, userInfo: [NSLocalizedDescriptionKey: "Model not found. Pull or import a validated model first."])
+        }
+
+        do {
+            try validateCapabilities(for: model, requiredRoute: requiredRoute, payload: payload)
+        } catch {
+            log(.routing, level: .warning, title: "Capability Rejected", message: error.localizedDescription, requestID: context.requestID, metadata: ["model": model.displayName, "route": requiredRoute.rawValue])
+            throw error
+        }
+        log(
+            .model,
+            title: "Resolved Model",
+            message: "Using \(model.displayName) for \(requiredRoute.rawValue).",
+            requestID: context.requestID,
+            metadata: [
+                "catalog_id": model.catalogId,
+                "backend": model.backendKind.rawValue,
+                "route": requiredRoute.rawValue
+            ]
+        )
+
+        if let entry = try await RuntimeCoordinator.shared.resolveModelReference(
+            model.catalogId,
+            contextLength: AppSettings.shared.defaultContextLength
+        ) {
+            let compatibility = await DeviceCapabilityService.shared.compatibility(for: entry)
+            guard compatibility.isUsable else {
+                log(.model, level: .warning, title: "Device Compatibility Rejected", message: compatibility.message, requestID: context.requestID, metadata: ["model": model.displayName, "route": requiredRoute.rawValue])
+                throw NSError(
+                    domain: "ServerManager",
+                    code: 400,
+                    userInfo: [NSLocalizedDescriptionKey: compatibility.message]
+                )
+            }
+        }
+
+        guard model.isServerRunnable else {
+            log(.model, level: .warning, title: "Model Not Runnable", message: model.validationSummary ?? "The model is not validated as runnable.", requestID: context.requestID, metadata: ["model": model.displayName, "route": requiredRoute.rawValue])
+            throw NSError(
+                domain: "ServerManager",
+                code: 400,
+                userInfo: [
+                    NSLocalizedDescriptionKey: model.validationSummary
+                        ?? "This model is installed, but it is not validated as runnable on this device yet."
+                ]
+            )
         }
 
         guard model.fileExists else {
+            log(.model, level: .warning, title: "Model Payload Missing", message: "The installed model payload is missing from disk.", requestID: context.requestID, metadata: ["model": model.displayName, "route": requiredRoute.rawValue])
             throw NSError(domain: "ServerManager", code: 404, userInfo: [NSLocalizedDescriptionKey: "Model payload not found. Re-import or re-download the model."])
         }
 
-        try await ModelRunner.shared.loadModel(
-            catalogId: model.catalogId,
-            contextLength: model.runtimeContextLength,
-            gpuLayers: AppSettings.shared.gpuLayers
-        )
+        log(.model, title: "Loading Model", message: "Loading model into the runtime.", requestID: context.requestID, metadata: ["model": model.displayName, "route": requiredRoute.rawValue])
+        do {
+            try await ModelRunner.shared.loadModel(
+                catalogId: model.catalogId,
+                contextLength: model.runtimeContextLength,
+                gpuLayers: AppSettings.shared.gpuLayers
+            )
+            log(.model, title: "Model Loaded", message: "Model loaded successfully.", requestID: context.requestID, metadata: ["model": model.displayName, "route": requiredRoute.rawValue])
+        } catch {
+            log(.model, level: .error, title: "Model Load Failed", message: error.localizedDescription, requestID: context.requestID, metadata: ["model": model.displayName, "route": requiredRoute.rawValue])
+            throw error
+        }
 
         return model
     }
@@ -761,16 +1434,51 @@ final class ServerManager {
             let entries = try await RuntimeCoordinator.shared.availableEntries(
                 contextLength: AppSettings.shared.defaultContextLength
             )
-            return entries
-                .map { ModelSnapshot(entry: $0) }
-                .filter(\.isServerExposed)
+            var snapshots: [ModelSnapshot] = []
+
+            for entry in entries {
+                let compatibility = await DeviceCapabilityService.shared.compatibility(for: entry)
+                let snapshot = ModelSnapshot(entry: entry)
+                if snapshot.isServerRunnable && compatibility.isUsable {
+                    snapshots.append(snapshot)
+                }
+            }
+
+            return snapshots
         } catch {
-            print("Failed to load server models from runtime registry: \(error)")
+            log(.error, level: .error, title: "Server Model Refresh Failed", message: error.localizedDescription)
             return []
         }
     }
 
+    private func remoteAddress(for connection: NWConnection) -> String {
+        let endpoint = connection.currentPath?.remoteEndpoint ?? connection.endpoint
+
+        switch endpoint {
+        case .hostPort(let host, let port):
+            return "\(host):\(port)"
+        case .service(let name, let type, let domain, _):
+            return "\(name).\(type)\(domain)"
+        case .unix(let path):
+            return path
+        case .url(let url):
+            return url.absoluteString
+        case .opaque(let data):
+            return String(describing: data)
+        @unknown default:
+            return "unknown"
+        }
+    }
+
     private func serverModel(named modelName: String) async -> ModelSnapshot? {
+        guard let snapshot = await resolvedServerModel(named: modelName) else {
+            return nil
+        }
+
+        return snapshot.isServerRunnable ? snapshot : nil
+    }
+
+    private func resolvedServerModel(named modelName: String) async -> ModelSnapshot? {
         do {
             guard let entry = try await RuntimeCoordinator.shared.resolveModelReference(
                 modelName,
@@ -779,12 +1487,339 @@ final class ServerManager {
                 return nil
             }
 
-            let snapshot = ModelSnapshot(entry: entry)
-            return snapshot.isServerExposed ? snapshot : nil
+            return ModelSnapshot(entry: entry)
         } catch {
-            print("Failed to resolve server model '\(modelName)': \(error)")
+            log(.model, level: .warning, title: "Model Resolution Failed", message: error.localizedDescription, metadata: ["requested_model": modelName])
             return nil
         }
+    }
+
+    private func legacyModelMetadata(for snapshot: ModelSnapshot) -> [String: Any] {
+        let identifier = legacyModelName(for: snapshot)
+        return [
+            "name": identifier,
+            "model": identifier,
+            "size": snapshot.size,
+            "modified_at": iso8601String(from: snapshot.downloadDate),
+            "validation": validationPayload(for: snapshot),
+            "capabilities": capabilityPayload(for: snapshot),
+            "supported_routes": snapshot.effectiveServerCapabilities.supportedRoutes.map(\.rawValue),
+            "details": [
+                "parameter_size": snapshot.parameters,
+                "quantization_level": snapshot.quantization,
+                "context_length": snapshot.contextLength
+            ]
+        ]
+    }
+
+    private func openAIModelMetadata(for snapshot: ModelSnapshot, createdAt: Int) -> [String: Any] {
+        [
+            "id": openAIModelIdentifier(for: snapshot),
+            "object": "model",
+            "created": createdAt,
+            "owned_by": "local",
+            "capabilities": capabilityPayload(for: snapshot),
+            "supported_routes": snapshot.effectiveServerCapabilities.supportedRoutes.map(\.rawValue),
+            "validation": validationPayload(for: snapshot)
+        ]
+    }
+
+    private func capabilityPayload(for snapshot: ModelSnapshot) -> [String: Any] {
+        let capabilities = snapshot.effectiveServerCapabilities
+        return [
+            "text_generation": capabilities.textGeneration,
+            "chat": capabilities.chat,
+            "streaming": capabilities.streaming,
+            "embeddings": capabilities.embeddings,
+            "tool_calling": capabilities.toolCalling,
+            "reasoning_controls": capabilities.reasoningControls,
+            "image_input": capabilities.imageInput,
+            "audio_input": capabilities.audioInput,
+            "video_input": capabilities.videoInput,
+            "multilingual": capabilities.multilingual
+        ]
+    }
+
+    private func validationPayload(for snapshot: ModelSnapshot) -> [String: Any] {
+        [
+            "status": snapshot.effectiveValidationStatus.rawValue,
+            "message": snapshot.validationSummary ?? "",
+            "validated_at": snapshot.validatedAt.map { iso8601String(from: $0) } ?? NSNull()
+        ]
+    }
+
+    private func parseChatPayload(
+        messages: [[String: Any]],
+        json: [String: Any],
+        defaultStream: Bool
+    ) -> ParsedInferencePayload {
+        let systemPrompt = messages
+            .filter { isInstructionRole($0["role"] as? String) }
+            .compactMap { conversationText(from: $0["content"]) }
+            .joined(separator: "\n\n")
+            .nonEmpty
+
+        let conversationTurns = messages.compactMap { message -> ConversationTurn? in
+            guard let role = message["role"] as? String, !isInstructionRole(role) else {
+                return nil
+            }
+
+            let parts = extractContentParts(from: message["content"])
+            if !parts.isEmpty {
+                return ConversationTurn(role: role, parts: parts)
+            }
+
+            guard let content = conversationText(from: message["content"]) else {
+                return nil
+            }
+
+            return ConversationTurn(role: role, content: content)
+        }
+
+        return ParsedInferencePayload(
+            prompt: "",
+            systemPrompt: systemPrompt,
+            conversationTurns: conversationTurns,
+            tools: parseTools(from: json),
+            reasoning: parseReasoning(from: json),
+            stream: json["stream"] as? Bool ?? defaultStream
+        )
+    }
+
+    private func parseResponsesPayload(from json: [String: Any]) -> ParsedInferencePayload {
+        let tools = parseTools(from: json)
+        let reasoning = parseReasoning(from: json)
+        let stream = json["stream"] as? Bool ?? false
+
+        if let inputText = conversationText(from: json["input"]) {
+            return ParsedInferencePayload(
+                prompt: inputText,
+                systemPrompt: extractStringContent(from: json["instructions"]),
+                conversationTurns: [],
+                tools: tools,
+                reasoning: reasoning,
+                stream: stream
+            )
+        }
+
+        if let items = json["input"] as? [[String: Any]] {
+            if items.allSatisfy({ $0["role"] != nil }) {
+                return parseChatPayload(messages: items, json: json, defaultStream: stream)
+            }
+
+            let userParts = items.flatMap { extractContentParts(from: $0["content"] ?? $0) }
+            return ParsedInferencePayload(
+                prompt: "",
+                systemPrompt: extractStringContent(from: json["instructions"]),
+                conversationTurns: userParts.isEmpty ? [] : [ConversationTurn(role: "user", parts: userParts)],
+                tools: tools,
+                reasoning: reasoning,
+                stream: stream
+            )
+        }
+
+        return ParsedInferencePayload(
+            prompt: "",
+            systemPrompt: extractStringContent(from: json["instructions"]),
+            conversationTurns: [],
+            tools: tools,
+            reasoning: reasoning,
+            stream: stream
+        )
+    }
+
+    private func parseTools(from json: [String: Any]) -> [InferenceToolDefinition] {
+        guard let toolObjects = json["tools"] as? [[String: Any]] else {
+            return []
+        }
+
+        return toolObjects.compactMap { tool in
+            if let function = tool["function"] as? [String: Any],
+               let name = function["name"] as? String {
+                return InferenceToolDefinition(
+                    name: name,
+                    description: function["description"] as? String,
+                    inputSchemaJSON: serializedJSONString(from: function["parameters"])
+                )
+            }
+
+            if let name = tool["name"] as? String {
+                return InferenceToolDefinition(
+                    name: name,
+                    description: tool["description"] as? String,
+                    inputSchemaJSON: serializedJSONString(from: tool["parameters"])
+                )
+            }
+
+            return nil
+        }
+    }
+
+    private func parseReasoning(from json: [String: Any]) -> InferenceReasoningOptions? {
+        if let reasoning = json["reasoning"] as? [String: Any] {
+            return InferenceReasoningOptions(
+                effort: reasoning["effort"] as? String,
+                summary: reasoning["summary"] as? String
+            )
+        }
+
+        if let effort = json["reasoning_effort"] as? String {
+            return InferenceReasoningOptions(effort: effort, summary: nil)
+        }
+
+        return nil
+    }
+
+    private func extractContentParts(from value: Any?) -> [ConversationContentPart] {
+        if let text = value as? String {
+            return text.trimmedForLookup.isEmpty ? [] : [.text(text)]
+        }
+
+        if let values = value as? [String] {
+            let text = values.joined(separator: "\n").trimmedForLookup
+            return text.isEmpty ? [] : [.text(text)]
+        }
+
+        if let part = value as? [String: Any] {
+            return extractContentParts(from: [part])
+        }
+
+        guard let parts = value as? [[String: Any]] else {
+            return []
+        }
+
+        return parts.compactMap { part in
+            let partType = ((part["type"] as? String) ?? "").lowercased()
+            if let text = (part["text"] as? String)?.nonEmpty ?? (part["input_text"] as? String)?.nonEmpty {
+                return .text(text)
+            }
+
+            if partType == "image_url" || partType == "input_image" {
+                if let image = part["image_url"] as? [String: Any] {
+                    return ConversationContentPart(
+                        kind: .imageURL,
+                        url: image["url"] as? String,
+                        detail: image["detail"] as? String
+                    )
+                }
+
+                return ConversationContentPart(kind: .imageURL, url: part["image_url"] as? String)
+            }
+
+            if partType == "audio_url" || partType == "input_audio" {
+                if let audio = part["audio_url"] as? [String: Any] {
+                    return ConversationContentPart(
+                        kind: .audioURL,
+                        url: audio["url"] as? String,
+                        mimeType: audio["mime_type"] as? String
+                    )
+                }
+
+                return ConversationContentPart(kind: .audioURL, url: part["audio_url"] as? String)
+            }
+
+            if partType == "video_url" || partType == "input_video" {
+                if let video = part["video_url"] as? [String: Any] {
+                    return ConversationContentPart(
+                        kind: .videoURL,
+                        url: video["url"] as? String,
+                        mimeType: video["mime_type"] as? String
+                    )
+                }
+
+                return ConversationContentPart(kind: .videoURL, url: part["video_url"] as? String)
+            }
+
+            if partType == "file_url" || partType == "input_file" {
+                if let file = part["file_url"] as? [String: Any] {
+                    return ConversationContentPart(
+                        kind: .fileURL,
+                        url: file["url"] as? String,
+                        mimeType: file["mime_type"] as? String
+                    )
+                }
+
+                return ConversationContentPart(kind: .fileURL, url: part["file_url"] as? String)
+            }
+
+            return nil
+        }
+    }
+
+    private func conversationText(from value: Any?) -> String? {
+        let text = extractContentParts(from: value)
+            .compactMap(\.text)
+            .joined()
+            .nonEmpty
+
+        return text ?? extractStringContent(from: value)
+    }
+
+    private func serializedJSONString(from value: Any?) -> String? {
+        guard let value,
+              JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
+              let string = String(data: data, encoding: .utf8)
+        else {
+            return nil
+        }
+
+        return string
+    }
+
+    private func validateCapabilities(
+        for model: ModelSnapshot,
+        requiredRoute: ServerSupportedRoute,
+        payload: ParsedInferencePayload
+    ) throws {
+        let capabilities = model.effectiveServerCapabilities
+        guard capabilities.supportedRoutes.contains(requiredRoute) else {
+            throw unsupportedCapabilityError(
+                "The model \(model.displayName) does not support \(requiredRoute.rawValue). Supported routes: \(capabilities.supportedRoutes.map(\.rawValue).joined(separator: ", "))."
+            )
+        }
+
+        if payload.stream && !capabilities.streaming {
+            throw unsupportedCapabilityError("The model \(model.displayName) does not support streaming responses.")
+        }
+
+        if !payload.prompt.trimmedForLookup.isEmpty && !capabilities.textGeneration {
+            throw unsupportedCapabilityError("The model \(model.displayName) does not advertise text generation support.")
+        }
+
+        if !payload.conversationTurns.isEmpty && !capabilities.chat {
+            throw unsupportedCapabilityError("The model \(model.displayName) does not advertise chat-style message support.")
+        }
+
+        if !payload.tools.isEmpty && !capabilities.toolCalling {
+            throw unsupportedCapabilityError("The model \(model.displayName) does not advertise tool calling support.")
+        }
+
+        if payload.reasoning != nil && !capabilities.reasoningControls {
+            throw unsupportedCapabilityError("The model \(model.displayName) does not advertise reasoning controls.")
+        }
+
+        if payload.conversationTurns.contains(where: { turn in
+            turn.parts?.contains(where: { $0.kind == .imageURL }) ?? false
+        }) && !capabilities.imageInput {
+            throw unsupportedCapabilityError("The model \(model.displayName) does not accept image inputs.")
+        }
+
+        if payload.conversationTurns.contains(where: { turn in
+            turn.parts?.contains(where: { $0.kind == .audioURL }) ?? false
+        }) && !capabilities.audioInput {
+            throw unsupportedCapabilityError("The model \(model.displayName) does not accept audio inputs.")
+        }
+
+        if payload.conversationTurns.contains(where: { turn in
+            turn.parts?.contains(where: { $0.kind == .videoURL }) ?? false
+        }) && !capabilities.videoInput {
+            throw unsupportedCapabilityError("The model \(model.displayName) does not accept video inputs.")
+        }
+    }
+
+    private func unsupportedCapabilityError(_ message: String) -> NSError {
+        NSError(domain: "ServerManager", code: 400, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
     private func streamLegacyGenerate(
@@ -792,9 +1827,11 @@ final class ServerManager {
         systemPrompt: String?,
         model: String,
         parameters: ModelParameters,
-        on connection: NWConnection
+        on connection: NWConnection,
+        context: ServerRequestContext
     ) async {
-        sendStreamHeaders(contentType: "application/x-ndjson", on: connection)
+        log(.generation, title: "Legacy Generate Started", message: "Streaming `/api/generate` response.", requestID: context.requestID, metadata: ["model": model])
+        sendStreamHeaders(contentType: "application/x-ndjson", on: connection, context: context)
 
         do {
             let result = try await ModelRunner.shared.generate(prompt: prompt, systemPrompt: systemPrompt, parameters: parameters) { [self] token in
@@ -804,7 +1841,8 @@ final class ServerManager {
                     "response": token,
                     "done": false
                 ]
-                self.sendNDJSONChunk(data: chunk, on: connection, closeAfterSend: false)
+                self.log(.stream, title: "Legacy Generate Chunk", message: "Sent streamed token chunk.", requestID: context.requestID, body: token, metadata: ["model": model])
+                self.sendNDJSONChunk(data: chunk, on: connection, closeAfterSend: false, context: context)
             }
 
             let finalChunk: [String: Any] = [
@@ -820,13 +1858,13 @@ final class ServerManager {
                 "eval_duration": Int(result.generationTime * 1_000_000_000)
             ]
 
-            sendNDJSONChunk(data: finalChunk, on: connection, closeAfterSend: true)
+            sendNDJSONChunk(data: finalChunk, on: connection, closeAfterSend: true, context: context)
         } catch {
             let errorChunk: [String: Any] = [
                 "error": error.localizedDescription,
                 "done": true
             ]
-            sendNDJSONChunk(data: errorChunk, on: connection, closeAfterSend: true)
+            sendNDJSONChunk(data: errorChunk, on: connection, closeAfterSend: true, context: context)
         }
     }
 
@@ -835,9 +1873,11 @@ final class ServerManager {
         systemPrompt: String?,
         model: String,
         parameters: ModelParameters,
-        on connection: NWConnection
+        on connection: NWConnection,
+        context: ServerRequestContext
     ) async {
         do {
+            log(.generation, title: "Legacy Generate Started", message: "Completing `/api/generate` response.", requestID: context.requestID, metadata: ["model": model])
             let result = try await ModelRunner.shared.generate(prompt: prompt, systemPrompt: systemPrompt, parameters: parameters) { _ in }
 
             sendJSONResponse(
@@ -854,10 +1894,11 @@ final class ServerManager {
                     "eval_count": result.tokensGenerated,
                     "eval_duration": Int(result.generationTime * 1_000_000_000)
                 ],
-                on: connection
+                on: connection,
+                context: context
             )
         } catch {
-            sendErrorResponse(status: httpStatus(for: error), message: error.localizedDescription, on: connection)
+            sendErrorResponse(status: httpStatus(for: error), message: error.localizedDescription, on: connection, context: context)
         }
     }
 
@@ -866,9 +1907,11 @@ final class ServerManager {
         systemPrompt: String?,
         model: String,
         parameters: ModelParameters,
-        on connection: NWConnection
+        on connection: NWConnection,
+        context: ServerRequestContext
     ) async {
-        sendStreamHeaders(contentType: "application/x-ndjson", on: connection)
+        log(.generation, title: "Legacy Chat Started", message: "Streaming `/api/chat` response.", requestID: context.requestID, metadata: ["model": model])
+        sendStreamHeaders(contentType: "application/x-ndjson", on: connection, context: context)
 
         do {
             let result = try await ModelRunner.shared.generate(
@@ -886,7 +1929,8 @@ final class ServerManager {
                     ],
                     "done": false
                 ]
-                self.sendNDJSONChunk(data: chunk, on: connection, closeAfterSend: false)
+                self.log(.stream, title: "Legacy Chat Chunk", message: "Sent streamed chat token chunk.", requestID: context.requestID, body: token, metadata: ["model": model])
+                self.sendNDJSONChunk(data: chunk, on: connection, closeAfterSend: false, context: context)
             }
 
             let finalChunk: [String: Any] = [
@@ -905,13 +1949,13 @@ final class ServerManager {
                 "eval_duration": Int(result.generationTime * 1_000_000_000)
             ]
 
-            sendNDJSONChunk(data: finalChunk, on: connection, closeAfterSend: true)
+            sendNDJSONChunk(data: finalChunk, on: connection, closeAfterSend: true, context: context)
         } catch {
             let errorChunk: [String: Any] = [
                 "error": error.localizedDescription,
                 "done": true
             ]
-            sendNDJSONChunk(data: errorChunk, on: connection, closeAfterSend: true)
+            sendNDJSONChunk(data: errorChunk, on: connection, closeAfterSend: true, context: context)
         }
     }
 
@@ -920,9 +1964,11 @@ final class ServerManager {
         systemPrompt: String?,
         model: String,
         parameters: ModelParameters,
-        on connection: NWConnection
+        on connection: NWConnection,
+        context: ServerRequestContext
     ) async {
         do {
+            log(.generation, title: "Legacy Chat Started", message: "Completing `/api/chat` response.", requestID: context.requestID, metadata: ["model": model])
             let result = try await ModelRunner.shared.generate(
                 prompt: "",
                 systemPrompt: systemPrompt,
@@ -947,10 +1993,11 @@ final class ServerManager {
                     "eval_count": result.tokensGenerated,
                     "eval_duration": Int(result.generationTime * 1_000_000_000)
                 ],
-                on: connection
+                on: connection,
+                context: context
             )
         } catch {
-            sendErrorResponse(status: httpStatus(for: error), message: error.localizedDescription, on: connection)
+            sendErrorResponse(status: httpStatus(for: error), message: error.localizedDescription, on: connection, context: context)
         }
     }
 
@@ -960,9 +2007,11 @@ final class ServerManager {
         model: String,
         prompt: String,
         parameters: ModelParameters,
-        on connection: NWConnection
+        on connection: NWConnection,
+        context: ServerRequestContext
     ) async {
-        sendStreamHeaders(on: connection)
+        log(.generation, title: "OpenAI Completion Started", message: "Streaming `/v1/completions` response.", requestID: context.requestID, metadata: ["model": model])
+        sendStreamHeaders(on: connection, context: context)
 
         do {
             _ = try await ModelRunner.shared.generate(prompt: prompt, parameters: parameters) { token in
@@ -977,7 +2026,8 @@ final class ServerManager {
                         "finish_reason": NSNull()
                     ]]
                 ]
-                self.sendSSEChunk(data: chunk, on: connection, closeAfterSend: false)
+                self.log(.stream, title: "OpenAI Completion Chunk", message: "Sent streamed completion delta.", requestID: context.requestID, body: token, metadata: ["model": model])
+                self.sendSSEChunk(data: chunk, on: connection, closeAfterSend: false, context: context)
             }
 
             let finalChunk: [String: Any] = [
@@ -991,11 +2041,11 @@ final class ServerManager {
                     "finish_reason": "stop"
                 ]]
             ]
-            sendSSEChunk(data: finalChunk, on: connection, closeAfterSend: false)
-            sendDoneChunk(on: connection)
+            sendSSEChunk(data: finalChunk, on: connection, closeAfterSend: false, context: context)
+            sendDoneChunk(on: connection, context: context)
         } catch {
             let status = httpStatus(for: error)
-            sendOpenAIStreamError(status: status, message: error.localizedDescription, type: openAIErrorType(for: status), on: connection)
+            sendOpenAIStreamError(status: status, message: error.localizedDescription, type: openAIErrorType(for: status), on: connection, context: context)
         }
     }
 
@@ -1005,9 +2055,11 @@ final class ServerManager {
         model: String,
         prompt: String,
         parameters: ModelParameters,
-        on connection: NWConnection
+        on connection: NWConnection,
+        context: ServerRequestContext
     ) async {
         do {
+            log(.generation, title: "OpenAI Completion Started", message: "Completing `/v1/completions` response.", requestID: context.requestID, metadata: ["model": model])
             let result = try await ModelRunner.shared.generate(prompt: prompt, parameters: parameters) { _ in }
             sendJSONResponse(
                 status: 200,
@@ -1027,11 +2079,12 @@ final class ServerManager {
                         "total_tokens": result.totalTokens
                     ]
                 ],
-                on: connection
+                on: connection,
+                context: context
             )
         } catch {
             let status = httpStatus(for: error)
-            sendOpenAIErrorResponse(status: status, message: error.localizedDescription, type: openAIErrorType(for: status), on: connection)
+            sendOpenAIErrorResponse(status: status, message: error.localizedDescription, type: openAIErrorType(for: status), on: connection, context: context)
         }
     }
 
@@ -1042,9 +2095,11 @@ final class ServerManager {
         conversationTurns: [ConversationTurn],
         systemPrompt: String?,
         parameters: ModelParameters,
-        on connection: NWConnection
+        on connection: NWConnection,
+        context: ServerRequestContext
     ) async {
-        sendStreamHeaders(on: connection)
+        log(.generation, title: "OpenAI Chat Started", message: "Streaming `/v1/chat/completions` response.", requestID: context.requestID, metadata: ["model": model])
+        sendStreamHeaders(on: connection, context: context)
 
         let roleChunk: [String: Any] = [
             "id": requestId,
@@ -1057,7 +2112,7 @@ final class ServerManager {
                 "finish_reason": NSNull()
             ]]
         ]
-        sendSSEChunk(data: roleChunk, on: connection, closeAfterSend: false)
+        sendSSEChunk(data: roleChunk, on: connection, closeAfterSend: false, context: context)
 
         do {
             _ = try await ModelRunner.shared.generate(
@@ -1077,7 +2132,8 @@ final class ServerManager {
                         "finish_reason": NSNull()
                     ]]
                 ]
-                self.sendSSEChunk(data: chunk, on: connection, closeAfterSend: false)
+                self.log(.stream, title: "OpenAI Chat Chunk", message: "Sent streamed chat delta.", requestID: context.requestID, body: token, metadata: ["model": model])
+                self.sendSSEChunk(data: chunk, on: connection, closeAfterSend: false, context: context)
             }
 
             let finalChunk: [String: Any] = [
@@ -1091,11 +2147,11 @@ final class ServerManager {
                     "finish_reason": "stop"
                 ]]
             ]
-            sendSSEChunk(data: finalChunk, on: connection, closeAfterSend: false)
-            sendDoneChunk(on: connection)
+            sendSSEChunk(data: finalChunk, on: connection, closeAfterSend: false, context: context)
+            sendDoneChunk(on: connection, context: context)
         } catch {
             let status = httpStatus(for: error)
-            sendOpenAIStreamError(status: status, message: error.localizedDescription, type: openAIErrorType(for: status), on: connection)
+            sendOpenAIStreamError(status: status, message: error.localizedDescription, type: openAIErrorType(for: status), on: connection, context: context)
         }
     }
 
@@ -1106,9 +2162,11 @@ final class ServerManager {
         conversationTurns: [ConversationTurn],
         systemPrompt: String?,
         parameters: ModelParameters,
-        on connection: NWConnection
+        on connection: NWConnection,
+        context: ServerRequestContext
     ) async {
         do {
+            log(.generation, title: "OpenAI Chat Started", message: "Completing `/v1/chat/completions` response.", requestID: context.requestID, metadata: ["model": model])
             let result = try await ModelRunner.shared.generate(
                 prompt: "",
                 systemPrompt: systemPrompt,
@@ -1136,36 +2194,124 @@ final class ServerManager {
                         "total_tokens": result.totalTokens
                     ]
                 ],
-                on: connection
+                on: connection,
+                context: context
             )
         } catch {
             let status = httpStatus(for: error)
-            sendOpenAIErrorResponse(status: status, message: error.localizedDescription, type: openAIErrorType(for: status), on: connection)
+            sendOpenAIErrorResponse(status: status, message: error.localizedDescription, type: openAIErrorType(for: status), on: connection, context: context)
         }
     }
 
-    private func resolvePullModelID(from requestedName: String) async throws -> String {
-        if requestedName.contains("/") {
-            return requestedName
-        }
+    private func streamOpenAIResponses(
+        requestId: String,
+        createdAt: Int,
+        model: String,
+        payload: ParsedInferencePayload,
+        parameters: ModelParameters,
+        on connection: NWConnection,
+        context: ServerRequestContext
+    ) async {
+        log(.generation, title: "OpenAI Responses Started", message: "Streaming `/v1/responses` response.", requestID: context.requestID, metadata: ["model": model])
+        sendStreamHeaders(on: connection, context: context)
 
-        let results = try await HuggingFaceService.shared.searchModels(query: requestedName, limit: 10)
-        if let exact = results.first(where: { $0.displayName.caseInsensitiveCompare(requestedName) == .orderedSame || $0.modelId.caseInsensitiveCompare(requestedName) == .orderedSame }) {
-            return exact.modelId
-        }
-        if let first = results.first {
-            return first.modelId
-        }
+        let createdEvent: [String: Any] = [
+            "type": "response.created",
+            "response": [
+                "id": requestId,
+                "object": "response",
+                "created": createdAt,
+                "model": model
+            ]
+        ]
+        sendSSEChunk(data: createdEvent, on: connection, closeAfterSend: false, context: context)
 
-        throw NSError(domain: "ServerManager", code: 404, userInfo: [NSLocalizedDescriptionKey: "Could not resolve a Hugging Face GGUF repository for \(requestedName)."])
+        do {
+            _ = try await ModelRunner.shared.generate(
+                prompt: payload.prompt,
+                systemPrompt: payload.systemPrompt,
+                conversationTurns: payload.conversationTurns,
+                tools: payload.tools,
+                reasoning: payload.reasoning,
+                parameters: parameters
+            ) { token in
+                let chunk: [String: Any] = [
+                    "type": "response.output_text.delta",
+                    "response_id": requestId,
+                    "delta": token
+                ]
+                self.log(.stream, title: "OpenAI Responses Chunk", message: "Sent streamed response delta.", requestID: context.requestID, body: token, metadata: ["model": model])
+                self.sendSSEChunk(data: chunk, on: connection, closeAfterSend: false, context: context)
+            }
+
+            let finalChunk: [String: Any] = [
+                "type": "response.completed",
+                "response": [
+                    "id": requestId,
+                    "object": "response",
+                    "created": createdAt,
+                    "model": model,
+                    "status": "completed"
+                ]
+            ]
+            sendSSEChunk(data: finalChunk, on: connection, closeAfterSend: false, context: context)
+            sendDoneChunk(on: connection, context: context)
+        } catch {
+            let status = httpStatus(for: error)
+            sendOpenAIStreamError(status: status, message: error.localizedDescription, type: openAIErrorType(for: status), on: connection, context: context)
+        }
     }
 
-    private func selectFile(for requestedFilename: String?, from files: [GGUFInfo]) -> GGUFInfo? {
-        guard let requestedFilename, !requestedFilename.isEmpty else {
-            return files.first
-        }
+    private func completeOpenAIResponses(
+        requestId: String,
+        createdAt: Int,
+        model: String,
+        payload: ParsedInferencePayload,
+        parameters: ModelParameters,
+        on connection: NWConnection,
+        context: ServerRequestContext
+    ) async {
+        do {
+            log(.generation, title: "OpenAI Responses Started", message: "Completing `/v1/responses` response.", requestID: context.requestID, metadata: ["model": model])
+            let result = try await ModelRunner.shared.generate(
+                prompt: payload.prompt,
+                systemPrompt: payload.systemPrompt,
+                conversationTurns: payload.conversationTurns,
+                tools: payload.tools,
+                reasoning: payload.reasoning,
+                parameters: parameters
+            ) { _ in }
 
-        return files.first { $0.filename.caseInsensitiveCompare(requestedFilename) == .orderedSame }
+            sendJSONResponse(
+                status: 200,
+                body: [
+                    "id": requestId,
+                    "object": "response",
+                    "created": createdAt,
+                    "model": model,
+                    "status": "completed",
+                    "output": [[
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [[
+                            "type": "output_text",
+                            "text": result.text
+                        ]]
+                    ]],
+                    "output_text": result.text,
+                    "usage": [
+                        "input_tokens": result.promptTokens,
+                        "output_tokens": result.tokensGenerated,
+                        "total_tokens": result.totalTokens
+                    ]
+                ],
+                on: connection,
+                context: context
+            )
+        } catch {
+            let status = httpStatus(for: error)
+            sendOpenAIErrorResponse(status: status, message: error.localizedDescription, type: openAIErrorType(for: status), on: connection, context: context)
+        }
     }
 
     private func legacyModelName(for snapshot: ModelSnapshot) -> String {
@@ -1306,11 +2452,104 @@ final class ServerManager {
         return nil
     }
 
-    private func sendJSONResponse(status: Int, body: [String: Any], on connection: NWConnection) {
+    private func sendAgentExecutionResponse(
+        _ result: AgentExecutionResult,
+        on connection: NWConnection,
+        context: ServerRequestContext? = nil
+    ) {
+        let status: Int
+        switch result.status {
+        case .success:
+            status = 200
+        case .pendingApproval:
+            status = 202
+        case .failure:
+            status = 400
+        }
+
+        var body: [String: Any] = [
+            "status": result.status.rawValue,
+            "tool": result.toolID,
+            "message": result.message
+        ]
+        if let data = result.data {
+            body["data"] = data.foundationObject
+        }
+        if let approvalRequest = result.approvalRequest {
+            body["approval"] = agentApprovalPayload(approvalRequest)
+        }
+
+        sendJSONResponse(status: status, body: body, on: connection, context: context)
+    }
+
+    private func agentToolPayload(_ tool: AgentToolDescriptor) -> [String: Any] {
+        [
+            "id": tool.id,
+            "title": tool.title,
+            "category": tool.category.rawValue,
+            "detail": tool.detail,
+            "network_scope": tool.networkScope.rawValue,
+            "write_scope": tool.writeScope.rawValue,
+            "needs_approval": tool.needsApproval,
+            "available": tool.available,
+            "availability_reason": tool.availabilityReason ?? "",
+            "timeout_seconds": tool.timeoutSeconds,
+            "quota": tool.quotaDescription,
+            "required_capabilities": tool.requiredCapabilities.map(\.rawValue)
+        ]
+    }
+
+    private func agentWorkspacePayload(_ workspace: AgentWorkspaceRecord) -> [String: Any] {
+        [
+            "id": workspace.id,
+            "name": workspace.name,
+            "kind": workspace.kind.rawValue,
+            "root_path": workspace.rootPath,
+            "source_description": workspace.sourceDescription,
+            "linked_repository": workspace.linkedRepository ?? NSNull(),
+            "linked_branch": workspace.linkedBranch ?? NSNull(),
+            "last_seed_version": workspace.lastSeedVersion ?? NSNull(),
+            "last_seeded_at": workspace.lastSeededAt.map { iso8601String(from: $0) } ?? NSNull(),
+            "last_refreshed_at": workspace.lastRefreshedAt.map { iso8601String(from: $0) } ?? NSNull()
+        ]
+    }
+
+    private func agentCheckpointPayload(_ checkpoint: AgentCheckpointRecord) -> [String: Any] {
+        [
+            "id": checkpoint.id.uuidString,
+            "workspace_id": checkpoint.workspaceID,
+            "name": checkpoint.name,
+            "reason": checkpoint.reason ?? "",
+            "created_at": iso8601String(from: checkpoint.createdAt)
+        ]
+    }
+
+    private func agentApprovalPayload(_ request: AgentApprovalRequest) -> [String: Any] {
+        [
+            "id": request.id.uuidString,
+            "tool_id": request.toolID,
+            "title": request.title,
+            "summary": request.summary,
+            "workspace_id": request.workspaceID ?? "",
+            "created_at": iso8601String(from: request.createdAt),
+            "status": request.status.rawValue,
+            "arguments": request.arguments.foundationObject
+        ]
+    }
+
+    private func sendJSONResponse(
+        status: Int,
+        body: [String: Any],
+        on connection: NWConnection,
+        context: ServerRequestContext? = nil
+    ) {
         guard let data = try? JSONSerialization.data(withJSONObject: body, options: [.fragmentsAllowed]) else {
-            sendErrorResponse(status: 500, message: "Internal Server Error", on: connection)
+            sendErrorResponse(status: 500, message: "Internal Server Error", on: connection, context: context)
             return
         }
+
+        let bodyString = String(data: data, encoding: .utf8)
+        logResponse(status: status, body: bodyString, context: context, responseKind: "json")
 
         let header = """
         HTTP/1.1 \(status) \(HTTPStatusText(status))
@@ -1329,7 +2568,12 @@ final class ServerManager {
         })
     }
 
-    private func sendStreamHeaders(contentType: String = "text/event-stream", on connection: NWConnection) {
+    private func sendStreamHeaders(
+        contentType: String = "text/event-stream",
+        on connection: NWConnection,
+        context: ServerRequestContext? = nil
+    ) {
+        logResponse(status: 200, body: "stream-start \(contentType)", context: context, responseKind: "stream")
         let header = """
         HTTP/1.1 200 OK
         Content-Type: \(contentType)
@@ -1345,7 +2589,8 @@ final class ServerManager {
         connection.send(content: header.data(using: .utf8), completion: .contentProcessed { _ in })
     }
 
-    private func sendCORSPreflightResponse(on connection: NWConnection) {
+    private func sendCORSPreflightResponse(on connection: NWConnection, context: ServerRequestContext? = nil) {
+        logResponse(status: 204, body: nil, context: context, responseKind: "preflight")
         let header = """
         HTTP/1.1 204 No Content
         Access-Control-Allow-Origin: *
@@ -1363,7 +2608,12 @@ final class ServerManager {
         })
     }
 
-    private func sendSSEChunk(data: [String: Any], on connection: NWConnection, closeAfterSend: Bool) {
+    private func sendSSEChunk(
+        data: [String: Any],
+        on connection: NWConnection,
+        closeAfterSend: Bool,
+        context: ServerRequestContext? = nil
+    ) {
         guard let jsonData = try? JSONSerialization.data(withJSONObject: data),
               let jsonString = String(data: jsonData, encoding: .utf8)
         else {
@@ -1373,10 +2623,16 @@ final class ServerManager {
             return
         }
 
-        sendRawSSEChunk("data: \(jsonString)\n\n", on: connection, closeAfterSend: closeAfterSend)
+        log(.stream, title: "SSE Chunk", message: "Sent SSE chunk.", requestID: context?.requestID, body: jsonString)
+        sendRawSSEChunk("data: \(jsonString)\n\n", on: connection, closeAfterSend: closeAfterSend, context: context)
     }
 
-    private func sendNDJSONChunk(data: [String: Any], on connection: NWConnection, closeAfterSend: Bool) {
+    private func sendNDJSONChunk(
+        data: [String: Any],
+        on connection: NWConnection,
+        closeAfterSend: Bool,
+        context: ServerRequestContext? = nil
+    ) {
         guard let jsonData = try? JSONSerialization.data(withJSONObject: data),
               let jsonString = String(data: jsonData, encoding: .utf8)
         else {
@@ -1386,11 +2642,12 @@ final class ServerManager {
             return
         }
 
-        sendRawSSEChunk("\(jsonString)\n", on: connection, closeAfterSend: closeAfterSend)
+        log(.stream, title: "NDJSON Chunk", message: "Sent NDJSON chunk.", requestID: context?.requestID, body: jsonString)
+        sendRawSSEChunk("\(jsonString)\n", on: connection, closeAfterSend: closeAfterSend, context: context)
     }
 
-    private func sendDoneChunk(on connection: NWConnection) {
-        sendRawSSEChunk("data: [DONE]\n\n", on: connection, closeAfterSend: true)
+    private func sendDoneChunk(on connection: NWConnection, context: ServerRequestContext? = nil) {
+        sendRawSSEChunk("data: [DONE]\n\n", on: connection, closeAfterSend: true, context: context)
     }
 
     private func sendOpenAIStreamError(
@@ -1398,7 +2655,8 @@ final class ServerManager {
         message: String,
         type: String = "server_error",
         code: String? = nil,
-        on connection: NWConnection
+        on connection: NWConnection,
+        context: ServerRequestContext? = nil
     ) {
         let _ = status
         var errorBody: [String: Any] = [
@@ -1410,13 +2668,19 @@ final class ServerManager {
             errorBody["code"] = code
         }
 
-        sendSSEChunk(data: ["error": errorBody], on: connection, closeAfterSend: false)
-        sendDoneChunk(on: connection)
+        sendSSEChunk(data: ["error": errorBody], on: connection, closeAfterSend: false, context: context)
+        sendDoneChunk(on: connection, context: context)
     }
 
-    private func sendPullError(stream: Bool, status: Int, message: String, on connection: NWConnection) {
+    private func sendPullError(
+        stream: Bool,
+        status: Int,
+        message: String,
+        on connection: NWConnection,
+        context: ServerRequestContext? = nil
+    ) {
         if stream {
-            sendStreamHeaders(contentType: "application/x-ndjson", on: connection)
+            sendStreamHeaders(contentType: "application/x-ndjson", on: connection, context: context)
             sendNDJSONChunk(
                 data: [
                     "error": message,
@@ -1424,14 +2688,21 @@ final class ServerManager {
                     "done": true
                 ],
                 on: connection,
-                closeAfterSend: true
+                closeAfterSend: true,
+                context: context
             )
         } else {
-            sendErrorResponse(status: status, message: message, on: connection)
+            sendErrorResponse(status: status, message: message, on: connection, context: context)
         }
     }
 
-    private func sendRawSSEChunk(_ chunk: String, on connection: NWConnection, closeAfterSend: Bool) {
+    private func sendRawSSEChunk(
+        _ chunk: String,
+        on connection: NWConnection,
+        closeAfterSend: Bool,
+        context: ServerRequestContext? = nil
+    ) {
+        log(.stream, title: "Raw Stream Chunk", message: "Sent raw stream payload.", requestID: context?.requestID, body: chunk)
         connection.send(content: chunk.data(using: .utf8), completion: .contentProcessed { _ in
             if closeAfterSend {
                 connection.cancel()
@@ -1439,8 +2710,13 @@ final class ServerManager {
         })
     }
 
-    private func sendErrorResponse(status: Int, message: String, on connection: NWConnection) {
-        sendJSONResponse(status: status, body: ["error": message], on: connection)
+    private func sendErrorResponse(
+        status: Int,
+        message: String,
+        on connection: NWConnection,
+        context: ServerRequestContext? = nil
+    ) {
+        sendJSONResponse(status: status, body: ["error": message], on: connection, context: context)
     }
 
     private func sendOpenAIErrorResponse(
@@ -1448,7 +2724,8 @@ final class ServerManager {
         message: String,
         type: String = "invalid_request_error",
         code: String? = nil,
-        on connection: NWConnection
+        on connection: NWConnection,
+        context: ServerRequestContext? = nil
     ) {
         var errorBody: [String: Any] = [
             "message": message,
@@ -1459,16 +2736,11 @@ final class ServerManager {
             errorBody["code"] = code
         }
 
-        sendJSONResponse(status: status, body: ["error": errorBody], on: connection)
+        sendJSONResponse(status: status, body: ["error": errorBody], on: connection, context: context)
     }
 
     private func extractBody(from request: String) -> Data? {
-        guard let separatorRange = request.range(of: "\r\n\r\n") else {
-            return nil
-        }
-
-        let body = request[separatorRange.upperBound...]
-        return body.data(using: .utf8)
+        requestBodyData(from: request)
     }
 
     private func parseHeaders(from lines: [String]) -> [String: String] {
@@ -1521,6 +2793,7 @@ final class ServerManager {
     private func HTTPStatusText(_ code: Int) -> String {
         switch code {
         case 200: return "OK"
+        case 204: return "No Content"
         case 400: return "Bad Request"
         case 401: return "Unauthorized"
         case 403: return "Forbidden"

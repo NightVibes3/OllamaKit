@@ -14,8 +14,8 @@ A powerful iOS app for running local Large Language Models (LLMs) with an OpenAI
 
 ### Core Functionality
 - **Local LLM Inference** - Run GGUF models on-device through a linked `llama.cpp` runtime with streaming token output
-- **Hugging Face Integration** - Browse and download models from Hugging Face Hub
-- **OpenAI-Compatible API Surface** - Use `/v1/models`, `/v1/completions`, and `/v1/chat/completions` with existing OpenAI clients
+- **Hugging Face Integration** - Browse and download models from Hugging Face Hub with device-aware suggestions and post-download validation
+- **OpenAI-Compatible API Surface** - Use `/v1/models`, `/v1/completions`, `/v1/chat/completions`, and `/v1/responses` with existing OpenAI clients
 - **Background Server Wakeups** - Best-effort background task restarts within iOS limits
 - **Chat Interface** - Beautiful chat UI with markdown rendering and streaming responses
 
@@ -28,10 +28,29 @@ A powerful iOS app for running local Large Language Models (LLMs) with an OpenAI
 
 ### Server Features
 - Configurable port (default: 11434)
-- Optional API key authentication
-- External network access support
+- Local-only, local-network, and public-URL exposure modes
+- Automatic API-key enforcement for public URL mode
+- Live structured server logs with request, response, auth, model-load, and stream details
 - Background task management
-- Ollama-style `/api/*` routes for model listing, generate, chat, pull, delete, and running-model status
+- Capability-aware Ollama-style and OpenAI-style routes, including `/api/show` and `/v1/responses`
+- Power-agent control routes under `/api/agent/*`
+
+### Sideload Power Agent
+- Built-in mutable OllamaKit workspace mirror stored under app support, with the installed app bundle kept read-only
+- Extra internal workspaces for mutable data, downloaded pages/assets, and GitHub-backed repo clones
+- Workspace tools for listing, reading, searching, diffing, writing, moving, deleting, activating, cloning, and resetting files
+- Automatic checkpoints before destructive agent operations, with manual restore points from the UI
+- Embedded browser sessions with DOM reading, link extraction, screenshots, page saving, downloads, and approval-gated form actions
+- Agent tab for runtime context, approvals, checkpoints, browser tabs, GitHub auth/search/actions flows, preview status, bundle patch history, and live agent logs
+- Local static web preview scaffolding plus JavaScriptCore-backed script execution
+- GitHub repository metadata, repo/code search, issues, pull requests, workflow-run lookup, workspace refresh, repo snapshot clone, branch creation, PR creation, and branch snapshot push support
+- Explicit tool inventory with approval-gated write and network-side-effect actions
+- Conservative per-model agent capability defaults, with manual override controls in the model catalog
+- Browser, workspace, GitHub, runtime, and remote-CI tools only expose themselves when the active model is allowed to use them
+- Optional live-bundle workspace on writable jailbreak-style installs, with per-file backups and restart-oriented patch history
+
+> [!NOTE]
+> The current power-agent build ships the workspace, checkpoint, browser, GitHub, restricted shell-style, JavaScript, preview, and `/api/agent/*` surfaces now. Embedded Python and embedded Node.js still remain feature-gated tool slots because their vendored runtimes are not bundled in this workspace build yet.
 
 ### iOS 26 Liquid Glass Design
 - Animated mesh gradient backgrounds
@@ -54,6 +73,8 @@ A powerful iOS app for running local Large Language Models (LLMs) with an OpenAI
 - Free storage space for models (2-8GB per model)
 
 ## Installation
+
+This project is aimed at sideloaded installs. The power-agent functionality is designed for that profile and is not constrained to an App Store-safe feature set.
 
 ### Download Pre-built IPA
 
@@ -112,6 +133,22 @@ open OllamaKit.xcodeproj
 xcodebuild -project OllamaKit.xcodeproj -scheme OllamaKit -configuration Release
 ```
 
+## Agent API
+
+The server now exposes a small power-agent control surface alongside the Ollama-style and OpenAI-style routes:
+
+- `GET /api/agent/context`
+- `GET /api/agent/tools`
+- `GET /api/agent/workspaces`
+- `GET /api/agent/checkpoints`
+- `GET /api/agent/approvals`
+- `POST /api/agent/execute`
+- `POST /api/agent/approvals/approve`
+- `POST /api/agent/approvals/reject`
+
+These routes are intended for explicit tool execution and approval handling against the mutable workspace mirror, not for direct mutation of the installed app bundle.
+Browser navigation, GitHub search, workflow inspection, bundle patch history, repo cloning, and all other power-agent actions are exposed through the `tool` values accepted by `POST /api/agent/execute`. `GET /api/agent/context` and `GET /api/agent/tools` include the active agent model plus the effective model-gated capability set that controls browser, coding, GitHub, and remote-CI access.
+
 ### Build Unsigned IPA
 
 ```bash
@@ -142,9 +179,10 @@ cd build && zip -r OllamaKit-unsigned.ipa Payload
 
 1. Open OllamaKit
 2. Go to the **Models** tab
-3. Search for a GGUF model on Hugging Face (e.g., "Llama-2-7B-GGUF")
+3. Search for a GGUF chat model on Hugging Face
 4. Select a quantization level (Q4_K_M recommended for balance)
 5. Download the model
+6. Wait for the app to validate that the downloaded GGUF actually loads on your device before using it in chat or through the server
 
 ### Chatting
 
@@ -162,7 +200,7 @@ cd build && zip -r OllamaKit-unsigned.ipa Payload
 4. Use with any OpenAI-compatible client:
 
 ```bash
-# List models
+# List validated server-runnable models
 curl http://localhost:11434/api/tags
 
 # Generate completion
@@ -184,14 +222,17 @@ curl -X POST http://localhost:11434/api/chat \
   }'
 ```
 
-When multiple downloaded files come from the same Hugging Face repo, use the exact identifier returned by `/api/tags` or `/v1/models`. The app exposes a composite identifier so API clients can target a specific downloaded quantization/file.
+When multiple downloaded files come from the same Hugging Face repo, use the exact identifier returned by `/api/tags` or `/v1/models`. The app exposes a composite identifier so API clients can target a specific downloaded quantization/file. These routes only advertise models that are both installed and validated as runnable on the current device.
 
 ### Connecting from Other Devices
 
-1. Enable "Allow External Connections" in Server settings
-2. Connect devices to the same WiFi network
-3. Use the Network URL shown in the Server tab
-4. Include API key in requests if authentication is enabled:
+1. Choose an exposure mode in the **Server** tab:
+   - `Local Only` for loopback clients
+   - `Local Network` for other devices on the same reachable network
+   - `Public URL` for a user-managed tunnel or reverse proxy URL
+2. For `Local Network`, use the Network URL shown in the Server tab.
+3. For `Public URL`, enter the external `http://` or `https://` URL from your tunnel or reverse proxy. OllamaKit does not create the tunnel for you.
+4. Include the API key in requests whenever authentication is enabled. Public URL mode always requires an API key:
 
 ```bash
 curl -H "Authorization: Bearer YOUR_API_KEY" \
@@ -228,21 +269,15 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
 
 ## Recommended Models
 
-### Small (2-4GB) - Good for 4GB RAM devices
-- [Phi-2](https://huggingface.co/microsoft/phi-2) - 2.7B parameters
-- [TinyLlama](https://huggingface.co/TinyLlama/TinyLlama-1.1B) - 1.1B parameters
-- [Gemma-2B](https://huggingface.co/google/gemma-2b) - 2B parameters
-
-### Medium (4-6GB) - Good for 6GB RAM devices
-- [Llama-2-7B](https://huggingface.co/meta-llama/Llama-2-7b) - 7B parameters
-- [Mistral-7B](https://huggingface.co/mistralai/Mistral-7B-v0.1) - 7B parameters
-- [Zephyr-7B](https://huggingface.co/HuggingFaceH4/zephyr-7b-beta) - 7B parameters
-
-### Large (6-8GB) - Good for 8GB+ RAM devices
-- [Llama-2-13B](https://huggingface.co/meta-llama/Llama-2-13b) - 13B parameters
-- [CodeLlama-13B](https://huggingface.co/codellama/CodeLlama-13b-hf) - 13B parameters
+The app now generates recommendations on-device instead of relying on a static list. Suggested downloads are filtered against the real iPhone or iPad runtime profile and favor repositories that look like actual chat/text-generation GGUF models. Manual search remains broad, but downloaded GGUF models must pass validation before they are treated as runnable.
 
 ## Troubleshooting
+
+### Model downloads but is not usable
+- Check the validation status in the Models tab
+- Try a smaller quantization or a smaller model
+- Import or pull the full model again if the payload is incomplete
+- Use the in-app Revalidate action after changing device conditions or app settings
 
 ### Model fails to load
 - Check available RAM (Settings → General → iPhone Storage)
@@ -296,14 +331,19 @@ Sources/OllamaKit/
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/tags` | List available models |
-| POST | `/api/generate` | Generate completion |
-| POST | `/api/chat` | Chat completion |
-| POST | `/api/pull` | Download model |
+| GET | `/api/tags` | List validated server-runnable models with capabilities |
+| POST | `/api/show` | Show model validation and capability detail |
+| POST | `/api/generate` | Generate completion with capability checks |
+| POST | `/api/chat` | Chat completion with capability checks |
+| POST | `/api/pull` | Download model and validate it |
 | DELETE | `/api/delete` | Delete model |
 | GET | `/api/ps` | List running models |
+| GET | `/v1/models` | OpenAI-compatible model list with capabilities |
+| POST | `/v1/completions` | OpenAI-compatible completions |
+| POST | `/v1/chat/completions` | OpenAI-compatible chat completions |
+| POST | `/v1/responses` | OpenAI-style rich responses |
 
-`/api/embed` and `/v1/embeddings` currently return `501 Not Implemented` in this build.
+`/api/embed` and `/v1/embeddings` are capability-gated. If the selected model does not advertise embeddings, the server returns an explicit unsupported-capability error. Embeddings are still not implemented by the local runtime in this build.
 
 ## Contributing
 
@@ -335,4 +375,4 @@ This app is not affiliated with Ollama or Hugging Face. Use at your own risk. Ru
 
 ---
 
-Made with ❤️ for the local AI community
+Built for local AI on iPhone and iPad

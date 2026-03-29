@@ -247,6 +247,8 @@ NSString *LCParseMachO(const char *path, bool readOnly, LCParseMachOCallback cal
     } else if (magic == MH_MAGIC_64 || magic == MH_MAGIC) {
         callback(path, (struct mach_header_64 *)map, fd, map);
     } else {
+        munmap(map, s.st_size);
+        close(fd);
         return @"Not a Mach-O file";
     }
 

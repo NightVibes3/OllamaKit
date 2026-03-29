@@ -139,12 +139,21 @@ public actor ModelRegistryStore {
                 packageRootPath: packageRootURL.path,
                 manifestPath: manifestURL.path,
                 importSource: .migratedLegacy,
+                isServerExposed: false,
+                validationStatus: .unknown,
+                validationMessage: "This migrated GGUF model has not been revalidated on this device yet.",
                 aliases: legacyAliases(
                     sourceModelID: seed.modelId,
                     displayName: seed.name.nonEmpty ?? localFileURL.deletingPathExtension().lastPathComponent,
                     localPath: seed.localPath
                 ),
                 capabilitySummary: capability,
+                serverCapabilities: ServerModelCapabilities.conservativeDefaults(
+                    backendKind: .ggufLlama,
+                    sourceModelID: seed.modelId,
+                    displayName: seed.name.nonEmpty ?? localFileURL.deletingPathExtension().lastPathComponent,
+                    capabilitySummary: capability
+                ),
                 createdAt: seed.downloadDate,
                 updatedAt: seed.downloadDate
             )
@@ -164,12 +173,21 @@ public actor ModelRegistryStore {
         size: Int64,
         quantization: String,
         parameterCountLabel: String,
-        contextLength: Int
+        contextLength: Int,
+        serverCapabilities: ServerModelCapabilities? = nil
     ) throws -> ModelCatalogEntry {
         let localFileURL = URL(fileURLWithPath: localPath)
         let packageRootURL = localFileURL.deletingLastPathComponent()
         let manifestURL = preferredManifestURL(forGGUFAt: localFileURL)
         let effectiveDisplayName = displayName.nonEmpty ?? localFileURL.deletingPathExtension().lastPathComponent
+        let capabilitySummary = ModelCapabilitySummary(
+            sizeBytes: size,
+            quantization: quantization,
+            parameterCountLabel: parameterCountLabel,
+            contextLength: contextLength,
+            supportsStreaming: true,
+            notes: nil
+        )
 
         let entry = ModelCatalogEntry(
             catalogId: catalogIdentifier(
@@ -185,19 +203,22 @@ public actor ModelRegistryStore {
             packageRootPath: packageRootURL.path,
             manifestPath: manifestURL.path,
             importSource: .huggingFaceDownload,
+            isServerExposed: false,
+            validationStatus: .pending,
+            validationMessage: "Validation will run after the download finishes.",
             aliases: legacyAliases(
                 sourceModelID: sourceModelID,
                 displayName: effectiveDisplayName,
                 localPath: localPath
             ),
-            capabilitySummary: ModelCapabilitySummary(
-                sizeBytes: size,
-                quantization: quantization,
-                parameterCountLabel: parameterCountLabel,
-                contextLength: contextLength,
-                supportsStreaming: true,
-                notes: nil
-            )
+            capabilitySummary: capabilitySummary,
+            serverCapabilities: serverCapabilities
+                ?? ServerModelCapabilities.conservativeDefaults(
+                    backendKind: .ggufLlama,
+                    sourceModelID: sourceModelID,
+                    displayName: effectiveDisplayName,
+                    capabilitySummary: capabilitySummary
+                )
         )
 
         return try upsert(entry)
@@ -249,6 +270,9 @@ public actor ModelRegistryStore {
             packageRootPath: packageRootURL.path,
             manifestPath: manifestURL.path,
             importSource: .localImport,
+            isServerExposed: false,
+            validationStatus: .pending,
+            validationMessage: "Validation will run after the import finishes.",
             aliases: legacyAliases(
                 sourceModelID: sourceModelID,
                 displayName: displayName,
@@ -261,6 +285,19 @@ public actor ModelRegistryStore {
                 contextLength: defaultContextLength,
                 supportsStreaming: true,
                 notes: nil
+            ),
+            serverCapabilities: ServerModelCapabilities.conservativeDefaults(
+                backendKind: .ggufLlama,
+                sourceModelID: sourceModelID,
+                displayName: displayName,
+                capabilitySummary: ModelCapabilitySummary(
+                    sizeBytes: fileSize,
+                    quantization: detectQuantization(from: destinationFileURL.lastPathComponent) ?? "GGUF",
+                    parameterCountLabel: detectParameterSize(from: destinationFileURL.lastPathComponent),
+                    contextLength: defaultContextLength,
+                    supportsStreaming: true,
+                    notes: nil
+                )
             )
         )
 
@@ -318,11 +355,48 @@ public actor ModelRegistryStore {
                 contextLength: defaultContextLength,
                 supportsStreaming: true,
                 notes: "Imported ANEMLL/CoreML package."
-            )
+            ),
+            serverCapabilities: upstreamManifest?.serverCapabilities
+                ?? ServerModelCapabilities.conservativeDefaults(
+                    backendKind: .coreMLPackage,
+                    sourceModelID: inferredModelID,
+                    displayName: displayName,
+                    capabilitySummary: upstreamManifest?.capabilitySummary ?? ModelCapabilitySummary(
+                        sizeBytes: totalSize,
+                        quantization: "CoreML",
+                        parameterCountLabel: "Package",
+                        contextLength: defaultContextLength,
+                        supportsStreaming: true,
+                        notes: "Imported ANEMLL/CoreML package."
+                    )
+                )
         )
 
         try upsert(entry)
         return entry
+    }
+
+    @discardableResult
+    public func updateValidation(
+        catalogId: String,
+        outcome: ModelValidationOutcome
+    ) throws -> ModelCatalogEntry {
+        guard var entry = try resolve(reference: catalogId, contextLength: 4096),
+              !entry.isBuiltInAppleModel
+        else {
+            throw InferenceError.registryFailure("The selected model could not be found in the registry.")
+        }
+
+        entry.validationStatus = outcome.status
+        entry.validationMessage = outcome.message
+        entry.validatedAt = outcome.validatedAt
+        entry.updatedAt = outcome.validatedAt
+
+        if entry.backendKind == .ggufLlama {
+            entry.isServerExposed = outcome.isRunnable
+        }
+
+        return try upsert(entry)
     }
 
     @discardableResult
@@ -474,6 +548,7 @@ public actor ModelRegistryStore {
             displayName: entry.displayName,
             backendKind: .ggufLlama,
             capabilitySummary: entry.capabilitySummary,
+            serverCapabilities: entry.serverCapabilities,
             files: [
                 ModelPackageFile(
                     path: localFileURL.lastPathComponent,
@@ -491,6 +566,7 @@ public actor ModelRegistryStore {
             displayName: entry.displayName,
             backendKind: entry.backendKind,
             capabilitySummary: entry.capabilitySummary,
+            serverCapabilities: entry.serverCapabilities,
             files: files
         )
     }

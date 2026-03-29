@@ -152,17 +152,47 @@ private extension ModelSnapshot {
     }
 
     var isRunnableInCurrentBuild: Bool {
-        backendKind != .coreMLPackage || hasRunnableCoreMLPayload
+        switch backendKind {
+        case .ggufLlama:
+            return isValidatedRunnable
+        case .coreMLPackage:
+            return hasRunnableCoreMLPayload
+        case .appleFoundation:
+            return true
+        }
     }
 
     var runtimeAvailabilityLabel: String? {
-        guard backendKind == .coreMLPackage, !hasRunnableCoreMLPayload else { return nil }
-        return "Incomplete Import"
+        switch backendKind {
+        case .ggufLlama:
+            switch effectiveValidationStatus {
+            case .pending:
+                return "Validating"
+            case .failed:
+                return "Validation Failed"
+            case .unknown:
+                return "Needs Validation"
+            case .validated:
+                return nil
+            }
+        case .coreMLPackage:
+            guard !hasRunnableCoreMLPayload else { return nil }
+            return "Incomplete Import"
+        case .appleFoundation:
+            return nil
+        }
     }
 
     var runtimeAvailabilityMessage: String? {
-        guard backendKind == .coreMLPackage, !hasRunnableCoreMLPayload else { return nil }
-        return "Import the full ANEMLL/CoreML model folder containing meta.yaml, tokenizer assets, and compiled .mlmodelc or .mlpackage payloads."
+        switch backendKind {
+        case .ggufLlama:
+            return validationSummary
+        case .coreMLPackage:
+            guard !hasRunnableCoreMLPayload else { return nil }
+            return "Import the full ANEMLL/CoreML model folder containing meta.yaml, tokenizer assets, and compiled .mlmodelc or .mlpackage payloads."
+        case .appleFoundation:
+            return nil
+        }
     }
 }
 
@@ -180,6 +210,73 @@ private extension ModelCompatibilityLevel {
         }
     }
 }
+
+private enum AgentCapabilityOverrideChoice: String, CaseIterable, Identifiable {
+    case inherited
+    case enabled
+    case disabled
+
+    var id: String { rawValue }
+
+    init(value: Bool?) {
+        switch value {
+        case true:
+            self = .enabled
+        case false:
+            self = .disabled
+        case nil:
+            self = .inherited
+        }
+    }
+
+    var optionalBool: Bool? {
+        switch self {
+        case .inherited:
+            return nil
+        case .enabled:
+            return true
+        case .disabled:
+            return false
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .inherited:
+            return "Default"
+        case .enabled:
+            return "On"
+        case .disabled:
+            return "Off"
+        }
+    }
+}
+
+private struct AgentCapabilitySettingDefinition: Identifiable {
+    let capability: AgentToolCapabilityKey
+    let title: String
+    let detail: String
+
+    var id: String { capability.rawValue }
+}
+
+private let agentCapabilityDefinitions: [AgentCapabilitySettingDefinition] = [
+    AgentCapabilitySettingDefinition(capability: .browserRead, title: "Browser Read", detail: "Open pages, navigate, inspect DOM, and read content."),
+    AgentCapabilitySettingDefinition(capability: .browserActions, title: "Browser Actions", detail: "Type, click, submit forms, and download through the embedded browser."),
+    AgentCapabilitySettingDefinition(capability: .internetRead, title: "Internet Read", detail: "Read public web resources and fetch URLs."),
+    AgentCapabilitySettingDefinition(capability: .internetWrite, title: "Internet Write", detail: "Perform side-effecting network actions such as PR creation or workflow reruns."),
+    AgentCapabilitySettingDefinition(capability: .workspaceRead, title: "Workspace Read", detail: "Read files, search code, and inspect diffs."),
+    AgentCapabilitySettingDefinition(capability: .workspaceWrite, title: "Workspace Write", detail: "Create checkpoints, write files, move paths, and delete workspace content."),
+    AgentCapabilitySettingDefinition(capability: .codeTools, title: "Code Tools", detail: "Use shell-style coding tools and web scaffolding helpers."),
+    AgentCapabilitySettingDefinition(capability: .jsRuntime, title: "JavaScript Runtime", detail: "Execute JavaScript locally with JavaScriptCore."),
+    AgentCapabilitySettingDefinition(capability: .pythonRuntime, title: "Python Runtime", detail: "Run embedded Python when that runtime is bundled."),
+    AgentCapabilitySettingDefinition(capability: .nodeRuntime, title: "Node Runtime", detail: "Run embedded Node.js tooling when that runtime is bundled."),
+    AgentCapabilitySettingDefinition(capability: .gitRead, title: "Git Read", detail: "Inspect repository state and clone snapshots."),
+    AgentCapabilitySettingDefinition(capability: .gitWrite, title: "Git Write", detail: "Create branches and push workspace changes to GitHub."),
+    AgentCapabilitySettingDefinition(capability: .githubAccess, title: "GitHub Access", detail: "Use GitHub repository, code search, issues, and PR APIs."),
+    AgentCapabilitySettingDefinition(capability: .remoteCI, title: "Remote CI", detail: "Read or trigger GitHub Actions runs for jobs the phone cannot do locally."),
+    AgentCapabilitySettingDefinition(capability: .bundleEdits, title: "Bundle Edits", detail: "Allow live bundle resource edits on writable jailbreak-style installs.")
+]
 
 struct ActiveModelSummary: View {
     let model: ModelSnapshot
@@ -253,6 +350,7 @@ struct DownloadedModelRow: View {
     let model: ModelSnapshot
     @ObservedObject var viewModel: ModelsViewModel
     @State private var showingOptions = false
+    @State private var showingAgentCapabilities = false
     
     var body: some View {
         HStack(spacing: 16) {
@@ -333,6 +431,14 @@ struct DownloadedModelRow: View {
                 }
             }
 
+            if model.backendKind == .ggufLlama {
+                Button {
+                    revalidateModel()
+                } label: {
+                    Label("Revalidate", systemImage: "checkmark.shield")
+                }
+            }
+
             Button {
                 presentModelInfo()
             } label: {
@@ -352,6 +458,12 @@ struct DownloadedModelRow: View {
                 }
             }
 
+            if model.backendKind == .ggufLlama {
+                Button("Revalidate") {
+                    revalidateModel()
+                }
+            }
+
             if model.isRunnableInCurrentBuild {
                 Button("Set as Default") {
                     AppSettings.shared.defaultModelId = model.persistentReference
@@ -368,10 +480,17 @@ struct DownloadedModelRow: View {
                 presentModelInfo()
             }
 
+            Button("Agent Tool Access") {
+                showingAgentCapabilities = true
+            }
+
             Button("Delete", role: .destructive) {
                 deleteModel()
             }
             Button("Cancel", role: .cancel) {}
+        }
+        .sheet(isPresented: $showingAgentCapabilities) {
+            ModelAgentCapabilitiesSheet(model: model)
         }
     }
 
@@ -405,6 +524,15 @@ struct DownloadedModelRow: View {
             "Identifier: \(model.catalogId)"
         ]
 
+        if model.backendKind == .ggufLlama {
+            details.append("Validation: \(model.effectiveValidationStatus.rawValue)")
+        }
+
+        details.append("Agent Override: \(model.hasAgentCapabilityOverride ? "Manual" : "Default")")
+        details.append("Agent Browser Read: \(model.effectiveAgentCapabilities.browserRead ? "On" : "Off")")
+        details.append("Agent Workspace Write: \(model.effectiveAgentCapabilities.workspaceWrite ? "On" : "Off")")
+        details.append("Agent GitHub Access: \(model.effectiveAgentCapabilities.githubAccess ? "On" : "Off")")
+
         if let runtimeAvailabilityMessage = model.runtimeAvailabilityMessage {
             details.append(runtimeAvailabilityMessage)
         }
@@ -412,6 +540,20 @@ struct DownloadedModelRow: View {
         viewModel.alertTitle = "Model Info"
         viewModel.errorMessage = details.joined(separator: "\n")
         viewModel.showError = true
+    }
+
+    private func revalidateModel() {
+        Task {
+            let validatedSnapshot = await ModelRunner.shared.validateModel(catalogId: model.catalogId)
+            viewModel.alertTitle = "Validation"
+            viewModel.errorMessage = validatedSnapshot?.validationSummary
+                ?? "Validation finished with no additional details."
+            viewModel.showError = true
+
+            await MainActor.run {
+                HapticManager.notification(validatedSnapshot?.isValidatedRunnable == true ? .success : .error)
+            }
+        }
     }
 
     private func deleteModel() {
@@ -422,6 +564,97 @@ struct DownloadedModelRow: View {
                     HapticManager.notification(.warning)
                 }
             }
+        }
+    }
+}
+
+struct ModelAgentCapabilitiesSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var settings = AppSettings.shared
+
+    let model: ModelSnapshot
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Model") {
+                    capabilityInfoRow(title: "Name", value: model.displayName)
+                    capabilityInfoRow(title: "Backend", value: model.backendDisplayName)
+                    capabilityInfoRow(title: "Validation", value: model.effectiveValidationStatus.rawValue)
+                    capabilityInfoRow(title: "Override", value: model.hasAgentCapabilityOverride ? "Manual" : "Default")
+                }
+
+                Section("Effective Access") {
+                    capabilityInfoRow(title: "Browser Read", value: model.effectiveAgentCapabilities.browserRead ? "On" : "Off")
+                    capabilityInfoRow(title: "Browser Actions", value: model.effectiveAgentCapabilities.browserActions ? "On" : "Off")
+                    capabilityInfoRow(title: "Workspace Write", value: model.effectiveAgentCapabilities.workspaceWrite ? "On" : "Off")
+                    capabilityInfoRow(title: "GitHub Access", value: model.effectiveAgentCapabilities.githubAccess ? "On" : "Off")
+                    capabilityInfoRow(title: "Remote CI", value: model.effectiveAgentCapabilities.remoteCI ? "On" : "Off")
+                    capabilityInfoRow(title: "Bundle Edits", value: model.effectiveAgentCapabilities.bundleEdits ? "On" : "Off")
+                }
+
+                Section("Overrides") {
+                    ForEach(agentCapabilityDefinitions) { definition in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(definition.title)
+                                .font(.system(size: 15, weight: .semibold))
+                            Text(definition.detail)
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                            Picker(definition.title, selection: overrideBinding(for: definition.capability)) {
+                                ForEach(AgentCapabilityOverrideChoice.allCases) { choice in
+                                    Text(choice.title).tag(choice)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            Text("Default: \(model.conservativeAgentCapabilities.supports(definition.capability) ? "On" : "Off")")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+            .navigationTitle("Agent Tool Access")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Reset") {
+                        settings.setAgentCapabilityOverride(nil, for: model.catalogId)
+                    }
+                }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+
+    private func overrideBinding(for capability: AgentToolCapabilityKey) -> Binding<AgentCapabilityOverrideChoice> {
+        Binding(
+            get: {
+                let override = settings.agentCapabilityOverride(for: model.catalogId)
+                return AgentCapabilityOverrideChoice(value: override?.value(for: capability))
+            },
+            set: { newValue in
+                var override = settings.agentCapabilityOverride(for: model.catalogId) ?? ModelAgentCapabilityOverride()
+                override = override.setting(newValue.optionalBool, for: capability)
+                settings.setAgentCapabilityOverride(override, for: model.catalogId)
+            }
+        )
+    }
+
+    @ViewBuilder
+    private func capabilityInfoRow(title: String, value: String) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Text(value)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing)
         }
     }
 }
@@ -462,6 +695,7 @@ struct BuiltInAppleModelCard: View {
         title: "Checking",
         message: "Checking Apple Intelligence availability on this device."
     )
+    @State private var showingAgentCapabilities = false
 
     private var model: ModelSnapshot {
         modelStore.selectionSnapshots.first(where: \.isBuiltInAppleModel)
@@ -530,12 +764,20 @@ struct BuiltInAppleModelCard: View {
                         }
                         .buttonStyle(.bordered)
                     }
+
+                    Button("Agent Tools") {
+                        showingAgentCapabilities = true
+                    }
+                    .buttonStyle(.bordered)
                 }
             }
             .padding(.vertical, 16)
         }
         .task {
             compatibility = await DeviceCapabilityService.shared.appleFoundationAvailability()
+        }
+        .sheet(isPresented: $showingAgentCapabilities) {
+            ModelAgentCapabilitiesSheet(model: model)
         }
     }
 }
@@ -705,7 +947,7 @@ struct ModelSearchSheet: View {
                         } header: {
                             Text("Recommended Downloads")
                         } footer: {
-                            Text("These are suggestions based on this phone's RAM budget. You can still search for and download any model.")
+                            Text("These suggestions use the live device profile on this iPhone or iPad, including RAM budget and runtime availability. You can still search for and download any model.")
                         }
                     } else if searchVM.results.isEmpty {
                         Section {
@@ -763,7 +1005,7 @@ struct ModelSearchSheet: View {
             .task {
                 await searchVM.loadRecommendationsIfNeeded()
             }
-            .alert("Download Failed", isPresented: Binding(
+            .alert(searchVM.downloadErrorTitle, isPresented: Binding(
                 get: { searchVM.downloadError != nil },
                 set: { if !$0 { searchVM.downloadError = nil } }
             )) {
@@ -820,6 +1062,22 @@ struct SearchResultRow: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
+
+                    if !model.repositoryAssessment.warningBadges.isEmpty {
+                        HStack(spacing: 6) {
+                            ForEach(model.repositoryAssessment.warningBadges, id: \.self) { badge in
+                                Text(badge)
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 3)
+                                    .background(
+                                        Capsule()
+                                            .fill(Color.orange.opacity(0.16))
+                                    )
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+                    }
                 }
                 
                 Spacer()
@@ -869,6 +1127,30 @@ struct ModelDetailSheet: View {
                                     .font(.system(size: 15))
                                     .foregroundStyle(.secondary)
                             }
+
+                            if !model.repositoryAssessment.warningBadges.isEmpty {
+                                HStack(spacing: 8) {
+                                    ForEach(model.repositoryAssessment.warningBadges, id: \.self) { badge in
+                                        Text(badge)
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 4)
+                                            .background(
+                                                Capsule()
+                                                    .fill(Color.orange.opacity(0.16))
+                                            )
+                                            .foregroundStyle(.orange)
+                                    }
+                                }
+                            }
+
+                            Text(model.repositoryAssessment.reason)
+                                .font(.system(size: 13))
+                                .foregroundStyle(
+                                    model.repositoryAssessment.warningBadges.isEmpty
+                                        ? Color.secondary
+                                        : Color.orange
+                                )
                             
                             HStack(spacing: 16) {
                                 if let downloads = model.downloads {
@@ -1082,11 +1364,23 @@ class ModelsViewModel: ObservableObject {
                 } else {
                     errorMessage = "\(importedModel.displayName) was imported, but it is missing runnable ANEMLL/CoreML metadata. Import the full model folder, not only a compiled bundle."
                 }
+            } else if importedModel.backendKind == .ggufLlama {
+                if importedModel.isValidatedRunnable {
+                    errorMessage = "\(importedModel.displayName) is ready to use."
+                } else {
+                    alertTitle = "Validation Failed"
+                    errorMessage = importedModel.validationSummary
+                        ?? "\(importedModel.displayName) imported successfully, but it failed validation on this device."
+                }
             } else {
                 errorMessage = "\(importedModel.displayName) is ready to use."
             }
             showError = true
-            HapticManager.notification(.success)
+            HapticManager.notification(
+                importedModel.backendKind == .ggufLlama && !importedModel.isValidatedRunnable
+                    ? .error
+                    : .success
+            )
         } catch {
             alertTitle = "Import Failed"
             errorMessage = error.localizedDescription
@@ -1112,12 +1406,14 @@ class ModelSearchViewModel: ObservableObject {
     @Published var isDownloading = false
     @Published var downloadingFile: GGUFInfo?
     @Published var downloadProgress = 0
+    @Published var downloadErrorTitle = "Download Failed"
     @Published var downloadError: String?
     @Published var pendingDownloadWarning: ModelDownloadWarning?
 
     private var searchRequestID = UUID()
     private var filesRequestID = UUID()
     private var recommendationsRequestID = UUID()
+    private var runtimeProfile = DeviceCapabilityProfile.placeholder.runtimeProfile
 
     init() {
         Task {
@@ -1140,7 +1436,7 @@ class ModelSearchViewModel: ObservableObject {
         isSearching = true
         
         do {
-            let fetchedResults = try await HuggingFaceService.shared.searchModels(query: trimmedQuery)
+            let fetchedResults = try await HuggingFaceService.shared.searchModelsDetailed(query: trimmedQuery)
             guard searchRequestID == requestID else { return }
             results = fetchedResults
         } catch {
@@ -1184,31 +1480,14 @@ class ModelSearchViewModel: ObservableObject {
         }
 
         do {
-            let trendingModels = try await HuggingFaceService.shared.getTrendingModels(limit: 18)
+            let suggestedCandidates = try await HuggingFaceService.shared.recommendedModels(
+                runtimeProfile: runtimeProfile,
+                limit: 6,
+                sourceLimit: 18
+            )
             guard recommendationsRequestID == requestID else { return }
 
-            var suggestedModels: [ModelRecommendation] = []
-
-            for model in trendingModels {
-                guard recommendationsRequestID == requestID else { return }
-
-                let files = try await HuggingFaceService.shared.getModelFiles(modelId: model.modelId)
-                guard let bestFile = bestRecommendedFile(from: files) else { continue }
-
-                let compatibility = deviceProfile.compatibility(for: bestFile.size)
-                guard compatibility != .tooLarge else { continue }
-
-                suggestedModels.append(
-                    ModelRecommendation(model: model, suggestedFile: bestFile, compatibility: compatibility)
-                )
-
-                if suggestedModels.count == 6 {
-                    break
-                }
-            }
-
-            guard recommendationsRequestID == requestID else { return }
-            recommendations = suggestedModels
+            recommendations = suggestedCandidates.map(ModelRecommendation.init(candidate:))
         } catch {
             guard recommendationsRequestID == requestID else { return }
             recommendations = []
@@ -1216,6 +1495,7 @@ class ModelSearchViewModel: ObservableObject {
     }
     
     func downloadFile(_ file: GGUFInfo, modelId: String) async {
+        downloadErrorTitle = "Download Failed"
         downloadError = nil
         isDownloading = true
         downloadingFile = file
@@ -1238,6 +1518,16 @@ class ModelSearchViewModel: ObservableObject {
             }
 
             await ModelStorage.shared.upsertDownloadedModel(model.registrySeed)
+            if let snapshot = await ModelStorage.shared.snapshot(name: model.apiIdentifier),
+               snapshot.backendKind == .ggufLlama,
+               !snapshot.isValidatedRunnable
+            {
+                downloadErrorTitle = "Validation Failed"
+                downloadError = snapshot.validationSummary
+                    ?? "\(snapshot.displayName) downloaded, but it failed validation on this device."
+                HapticManager.notification(.error)
+                return
+            }
             downloadProgress = 100
             HapticManager.notification(.success)
         } catch {
@@ -1297,52 +1587,11 @@ class ModelSearchViewModel: ObservableObject {
         return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
     }
 
-    private func bestRecommendedFile(from files: [GGUFInfo]) -> GGUFInfo? {
-        files
-            .compactMap { file -> (ModelFileCompatibility, Int, Int64, GGUFInfo)? in
-                let compatibility = deviceProfile.compatibility(for: file.size)
-                guard compatibility != .tooLarge else { return nil }
-                return (
-                    compatibility,
-                    quantizationRank(for: file.quantization),
-                    file.size ?? .max,
-                    file
-                )
-            }
-            .sorted { lhs, rhs in
-                if lhs.0.sortRank != rhs.0.sortRank {
-                    return lhs.0.sortRank < rhs.0.sortRank
-                }
-
-                if lhs.1 != rhs.1 {
-                    return lhs.1 < rhs.1
-                }
-
-                return lhs.2 < rhs.2
-            }
-            .first?
-            .3
-    }
-
-    private func quantizationRank(for quantization: String?) -> Int {
-        switch quantization?.uppercased() {
-        case "Q4_K_M", "Q4_K_S", "Q4_0":
-            return 0
-        case "Q5_K_M", "Q5_K_S", "Q5_0", "Q6_K":
-            return 1
-        case "Q3_K_M", "Q3_K_S", "Q3_K_L", "Q2_K":
-            return 2
-        case "Q8_0", "F16", "FP16", "FP32":
-            return 3
-        default:
-            return 4
-        }
-    }
-
     private func refreshDeviceProfile() async {
-        let profile = await DeviceCapabilityService.shared.currentProfile()
+        let profile = await DeviceCapabilityService.shared.currentRuntimeProfile()
         let appleAvailability = await DeviceCapabilityService.shared.appleFoundationAvailability()
-        deviceProfile = DeviceCapabilityProfile(profile: profile, appleAvailability: appleAvailability)
+        runtimeProfile = profile
+        deviceProfile = DeviceCapabilityProfile(runtimeProfile: profile, appleAvailability: appleAvailability)
     }
 }
 
@@ -1359,16 +1608,20 @@ struct DeviceCapabilityCard: View {
                     Text("\(profile.chipFamily) • \(profile.formattedPhysicalMemory) RAM • iOS \(profile.systemVersion)")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
+
+                    Text(profile.metalSummary)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
                 }
 
                 Spacer()
 
-                Image(systemName: "iphone.gen3")
+                Image(systemName: profile.deviceIconName)
                     .font(.system(size: 28))
                     .foregroundStyle(Color.accentColor)
             }
 
-            Text("Best results on this device are usually GGUF files up to \(profile.formattedRecommendedBudget). Files up to \(profile.formattedSupportedBudget) may still run, but larger ones are likely to be slow, unload often, or fail to fit.")
+            Text("Suggested models are filtered against this device profile. GGUF files up to \(profile.formattedRecommendedBudget) are preferred, and files up to \(profile.formattedSupportedBudget) may still load with more risk.")
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
 
@@ -1465,12 +1718,30 @@ struct CompatibilityBadge: View {
 }
 
 struct ModelRecommendation: Identifiable {
-    let model: HuggingFaceModel
-    let suggestedFile: GGUFInfo
-    let compatibility: ModelFileCompatibility
+    let candidate: HuggingFaceCandidate
+
+    init(candidate: HuggingFaceCandidate) {
+        self.candidate = candidate
+    }
+
+    var model: HuggingFaceModel {
+        candidate.model
+    }
+
+    var suggestedFile: GGUFInfo {
+        candidate.file
+    }
+
+    var compatibility: ModelFileCompatibility {
+        ModelFileCompatibility(level: candidate.compatibility.level)
+    }
+
+    var assessment: HuggingFaceRepositoryAssessment {
+        candidate.assessment
+    }
 
     var id: String {
-        "\(model.id)#\(suggestedFile.id)"
+        candidate.id
     }
 }
 
@@ -1556,62 +1827,74 @@ enum ModelFileCompatibility {
             return 3
         }
     }
+
+    init(level: ModelCompatibilityLevel) {
+        switch level {
+        case .recommended:
+            self = .recommended
+        case .supported:
+            self = .supported
+        case .unavailable:
+            self = .tooLarge
+        case .unknown:
+            self = .unknown
+        }
+    }
 }
 
 struct DeviceCapabilityProfile {
-    let machineIdentifier: String
-    let chipFamily: String
-    let systemVersion: String
-    let physicalMemoryBytes: Int64
-    let recommendedModelBudgetBytes: Int64
-    let supportedModelBudgetBytes: Int64
+    let runtimeProfile: DeviceRuntimeProfile
     let appleFoundationTitle: String
     let appleFoundationMessage: String
 
-    init(profile: DeviceProfile, appleAvailability: CompatibilityReport) {
-        self.machineIdentifier = profile.machineIdentifier
-        self.chipFamily = profile.chipFamily
-        self.systemVersion = profile.systemVersion
-        self.physicalMemoryBytes = profile.physicalMemoryBytes
-        self.recommendedModelBudgetBytes = profile.recommendedGGUFBudgetBytes
-        self.supportedModelBudgetBytes = profile.supportedGGUFBudgetBytes
+    init(runtimeProfile: DeviceRuntimeProfile, appleAvailability: CompatibilityReport) {
+        self.runtimeProfile = runtimeProfile
         self.appleFoundationTitle = appleAvailability.title
         self.appleFoundationMessage = appleAvailability.message
     }
 
     static let placeholder = DeviceCapabilityProfile(
-        machineIdentifier: "unknown",
-        chipFamily: "Apple Silicon",
-        systemVersion: ProcessInfo.processInfo.operatingSystemVersionString,
-        physicalMemoryBytes: Int64(ProcessInfo.processInfo.physicalMemory),
-        recommendedModelBudgetBytes: 2_000_000_000,
-        supportedModelBudgetBytes: 3_000_000_000,
+        runtimeProfile: DeviceRuntimeProfile(
+            machineIdentifier: "unknown",
+            chipFamily: "Apple Silicon",
+            systemVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            physicalMemoryBytes: Int64(ProcessInfo.processInfo.physicalMemory),
+            interfaceKind: .other,
+            recommendedGGUFBudgetBytes: 2_000_000_000,
+            supportedGGUFBudgetBytes: 3_000_000_000,
+            hasMetalDevice: true,
+            metalDeviceName: nil
+        ),
         appleFoundationTitle: "Checking",
         appleFoundationMessage: "Checking Apple Intelligence availability on this device."
     )
 
-    private init(
-        machineIdentifier: String,
-        chipFamily: String,
-        systemVersion: String,
-        physicalMemoryBytes: Int64,
-        recommendedModelBudgetBytes: Int64,
-        supportedModelBudgetBytes: Int64,
-        appleFoundationTitle: String,
-        appleFoundationMessage: String
-    ) {
-        self.machineIdentifier = machineIdentifier
-        self.chipFamily = chipFamily
-        self.systemVersion = systemVersion
-        self.physicalMemoryBytes = physicalMemoryBytes
-        self.recommendedModelBudgetBytes = recommendedModelBudgetBytes
-        self.supportedModelBudgetBytes = supportedModelBudgetBytes
-        self.appleFoundationTitle = appleFoundationTitle
-        self.appleFoundationMessage = appleFoundationMessage
+    var deviceLabel: String {
+        runtimeProfile.deviceLabel
     }
 
-    var deviceLabel: String {
-        UIDevice.current.userInterfaceIdiom == .pad ? "This iPad" : "This iPhone"
+    var machineIdentifier: String {
+        runtimeProfile.machineIdentifier
+    }
+
+    var chipFamily: String {
+        runtimeProfile.chipFamily
+    }
+
+    var systemVersion: String {
+        runtimeProfile.systemVersion
+    }
+
+    var physicalMemoryBytes: Int64 {
+        runtimeProfile.physicalMemoryBytes
+    }
+
+    var recommendedModelBudgetBytes: Int64 {
+        runtimeProfile.recommendedGGUFBudgetBytes
+    }
+
+    var supportedModelBudgetBytes: Int64 {
+        runtimeProfile.supportedGGUFBudgetBytes
     }
 
     var formattedPhysicalMemory: String {
@@ -1628,6 +1911,27 @@ struct DeviceCapabilityProfile {
 
     var appleFoundationSummary: String {
         "\(appleFoundationTitle): \(appleFoundationMessage)"
+    }
+
+    var metalSummary: String {
+        if let metalDeviceName = runtimeProfile.metalDeviceName {
+            return "Metal: \(metalDeviceName)"
+        }
+
+        return runtimeProfile.hasMetalDevice ? "Metal available" : "Metal unavailable"
+    }
+
+    var deviceIconName: String {
+        switch runtimeProfile.interfaceKind {
+        case .pad:
+            return "ipad"
+        case .mac:
+            return "laptopcomputer"
+        case .phone:
+            return "iphone.gen3"
+        case .other:
+            return "cpu"
+        }
     }
 
     func compatibility(for fileSize: Int64?) -> ModelFileCompatibility {

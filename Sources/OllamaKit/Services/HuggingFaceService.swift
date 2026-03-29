@@ -9,17 +9,25 @@ final class HuggingFaceService: @unchecked Sendable {
         let observation: NSKeyValueObservation
     }
 
-    private let baseURL = URL(string: "https://huggingface.co/api")!
-    private let downloadBaseURL = URL(string: "https://huggingface.co")!
+    private let baseURLString = "https://huggingface.co/api"
+    private let downloadBaseURLString = "https://huggingface.co"
     private let session: URLSession
+    private let decoder: JSONDecoder
     private let activeDownloadsLock = NSLock()
     private var activeDownloads: [String: ActiveDownload] = [:]
 
     private init(session: URLSession = .shared) {
         self.session = session
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        self.decoder = decoder
     }
 
     func searchModels(query: String, limit: Int = 20) async throws -> [HuggingFaceModel] {
+        guard let baseURL = URL(string: baseURLString) else {
+            throw URLError(.badURL)
+        }
+
         var components = URLComponents(url: baseURL.appendingPathComponent("models"), resolvingAgainstBaseURL: false)
         components?.queryItems = [
             URLQueryItem(name: "search", value: query),
@@ -35,10 +43,14 @@ final class HuggingFaceService: @unchecked Sendable {
 
         let (data, response) = try await session.data(for: authorizedRequest(url: url))
         try validate(response: response)
-        return try JSONDecoder().decode([HuggingFaceModel].self, from: data)
+        return try decoder.decode([HuggingFaceModel].self, from: data)
     }
 
     func getTrendingModels(limit: Int = 20) async throws -> [HuggingFaceModel] {
+        guard let baseURL = URL(string: baseURLString) else {
+            throw URLError(.badURL)
+        }
+
         var components = URLComponents(url: baseURL.appendingPathComponent("models"), resolvingAgainstBaseURL: false)
         components?.queryItems = [
             URLQueryItem(name: "limit", value: String(limit)),
@@ -53,11 +65,16 @@ final class HuggingFaceService: @unchecked Sendable {
 
         let (data, response) = try await session.data(for: authorizedRequest(url: url))
         try validate(response: response)
-        return try JSONDecoder().decode([HuggingFaceModel].self, from: data)
+        return try decoder.decode([HuggingFaceModel].self, from: data)
+    }
+
+    func searchModelsDetailed(query: String, limit: Int = 20) async throws -> [HuggingFaceModel] {
+        let results = try await searchModels(query: query, limit: limit)
+        return try await hydrate(models: results)
     }
 
     func getModelFiles(modelId: String) async throws -> [GGUFInfo] {
-        let url = repoAPIURL(modelId: modelId, suffix: ["tree", "main"])
+        let url = try repoAPIURL(modelId: modelId, suffix: ["tree", "main"])
         let (data, response) = try await session.data(for: authorizedRequest(url: url))
         try validate(response: response)
 
@@ -71,8 +88,15 @@ final class HuggingFaceService: @unchecked Sendable {
             }
 
             let filename = URL(fileURLWithPath: path).lastPathComponent
+            guard let downloadURL = try? repoDownloadURL(
+                modelId: modelId,
+                suffix: ["resolve", "main"] + path.split(separator: "/").map(String.init)
+            ) else {
+                return nil
+            }
+
             return GGUFInfo(
-                url: repoDownloadURL(modelId: modelId, suffix: ["resolve", "main"] + path.split(separator: "/").map(String.init)),
+                url: downloadURL,
                 filename: filename,
                 size: file["size"] as? Int64 ?? (file["size"] as? NSNumber)?.int64Value,
                 quantization: extractQuantization(from: filename)
@@ -81,6 +105,133 @@ final class HuggingFaceService: @unchecked Sendable {
         .sorted { lhs, rhs in
             (lhs.size ?? 0) < (rhs.size ?? 0)
         }
+    }
+
+    func getModelDetails(modelId: String) async throws -> HuggingFaceModel {
+        let url = try repoAPIURL(modelId: modelId)
+        let (data, response) = try await session.data(for: authorizedRequest(url: url))
+        try validate(response: response)
+        return try decoder.decode(HuggingFaceModel.self, from: data)
+    }
+
+    func recommendedModels(
+        runtimeProfile: DeviceRuntimeProfile,
+        limit: Int = 6,
+        sourceLimit: Int = 18
+    ) async throws -> [HuggingFaceCandidate] {
+        let trendingModels = try await getTrendingModels(limit: sourceLimit)
+        var candidates: [HuggingFaceCandidate] = []
+
+        for trendingModel in trendingModels {
+            do {
+                let detailedModel = try await hydratedModel(from: trendingModel)
+                guard let candidate = try await bestDownloadCandidate(
+                    for: detailedModel,
+                    runtimeProfile: runtimeProfile,
+                    includeCautionaryModels: false
+                ) else {
+                    continue
+                }
+
+                candidates.append(candidate)
+            } catch {
+                continue
+            }
+        }
+
+        return candidates
+            .sorted { self.compareCandidates($0, $1) }
+            .prefix(limit)
+            .map { $0 }
+    }
+
+    func resolvePullCandidate(
+        requestedName: String,
+        requestedFilename: String?,
+        runtimeProfile: DeviceRuntimeProfile
+    ) async throws -> HuggingFaceCandidate {
+        let trimmedName = requestedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            throw NSError(
+                domain: "HuggingFaceService",
+                code: 400,
+                userInfo: [NSLocalizedDescriptionKey: "Missing model name."]
+            )
+        }
+
+        if trimmedName.contains("/") {
+            let detailedModel = try await hydratedModel(from: HuggingFaceModel(
+                id: trimmedName,
+                description: nil,
+                downloads: nil,
+                likes: nil,
+                tags: nil,
+                author: nil,
+                pipelineTag: nil,
+                libraryName: nil,
+                gated: nil,
+                disabled: nil,
+                siblings: nil,
+                gguf: nil
+            ))
+
+            if let candidate = try await bestDownloadCandidate(
+                for: detailedModel,
+                requestedFilename: requestedFilename,
+                runtimeProfile: runtimeProfile,
+                includeCautionaryModels: true
+            ) {
+                return candidate
+            }
+
+            throw NSError(
+                domain: "HuggingFaceService",
+                code: 404,
+                userInfo: [NSLocalizedDescriptionKey: "No GGUF files were found for \(trimmedName)."]
+            )
+        }
+
+        let searchResults = try await searchModels(query: trimmedName, limit: 15)
+        let detailedResults = try await hydrate(models: searchResults.prefix(10).map { $0 })
+        let exactMatches = detailedResults.filter {
+            $0.modelId.caseInsensitiveCompare(trimmedName) == .orderedSame
+                || $0.displayName.caseInsensitiveCompare(trimmedName) == .orderedSame
+        }
+        let rankedResults = exactMatches + detailedResults.filter { candidate in
+            !exactMatches.contains(where: { $0.modelId == candidate.modelId })
+        }
+
+        var candidates: [HuggingFaceCandidate] = []
+
+        for result in rankedResults {
+            if let candidate = try await bestDownloadCandidate(
+                for: result,
+                requestedFilename: requestedFilename,
+                runtimeProfile: runtimeProfile,
+                includeCautionaryModels: false
+            ) {
+                candidates.append(candidate)
+            }
+        }
+
+        if let bestCandidate = candidates.sorted(by: { self.compareCandidates($0, $1) }).first {
+            return bestCandidate
+        }
+
+        if let blockedModel = rankedResults.first {
+            let assessment = blockedModel.repositoryAssessment
+            throw NSError(
+                domain: "HuggingFaceService",
+                code: 404,
+                userInfo: [NSLocalizedDescriptionKey: assessment.reason]
+            )
+        }
+
+        throw NSError(
+            domain: "HuggingFaceService",
+            code: 404,
+            userInfo: [NSLocalizedDescriptionKey: "Could not resolve a reliable chat-capable GGUF repository for \(trimmedName)."]
+        )
     }
 
     func downloadModel(
@@ -148,7 +299,7 @@ final class HuggingFaceService: @unchecked Sendable {
     }
 
     func getModelInfo(modelId: String) async throws -> ModelInfo {
-        let url = repoAPIURL(modelId: modelId)
+        let url = try repoAPIURL(modelId: modelId)
         let (data, response) = try await session.data(for: authorizedRequest(url: url))
         try validate(response: response)
 
@@ -273,7 +424,11 @@ final class HuggingFaceService: @unchecked Sendable {
         return matches.map { String(filename[$0]) } ?? "Unknown"
     }
 
-    private func repoAPIURL(modelId: String, suffix: [String] = []) -> URL {
+    private func repoAPIURL(modelId: String, suffix: [String] = []) throws -> URL {
+        guard let baseURL = URL(string: baseURLString) else {
+            throw URLError(.badURL)
+        }
+
         var url = baseURL.appendingPathComponent("models")
         for component in modelId.split(separator: "/").map(String.init) + suffix {
             url.appendPathComponent(component)
@@ -281,12 +436,193 @@ final class HuggingFaceService: @unchecked Sendable {
         return url
     }
 
-    private func repoDownloadURL(modelId: String, suffix: [String]) -> URL {
+    private func repoDownloadURL(modelId: String, suffix: [String]) throws -> URL {
+        guard let downloadBaseURL = URL(string: downloadBaseURLString) else {
+            throw URLError(.badURL)
+        }
+
         var url = downloadBaseURL
         for component in modelId.split(separator: "/").map(String.init) + suffix {
             url.appendPathComponent(component)
         }
         return url
+    }
+
+    private func hydratedModel(from model: HuggingFaceModel) async throws -> HuggingFaceModel {
+        if model.pipelineTag != nil || model.gated != nil || model.disabled != nil || model.siblings != nil || model.gguf != nil {
+            return model
+        }
+
+        return try await getModelDetails(modelId: model.modelId)
+    }
+
+    private func hydrate(models: [HuggingFaceModel]) async throws -> [HuggingFaceModel] {
+        var hydrated: [HuggingFaceModel] = []
+        hydrated.reserveCapacity(models.count)
+
+        for model in models {
+            do {
+                hydrated.append(try await hydratedModel(from: model))
+            } catch {
+                hydrated.append(model)
+            }
+        }
+
+        return hydrated
+    }
+
+    private func bestDownloadCandidate(
+        for model: HuggingFaceModel,
+        requestedFilename: String? = nil,
+        runtimeProfile: DeviceRuntimeProfile,
+        includeCautionaryModels: Bool
+    ) async throws -> HuggingFaceCandidate? {
+        let assessment = model.repositoryAssessment
+        if !includeCautionaryModels && !assessment.isResolutionEligible {
+            return nil
+        }
+        if includeCautionaryModels && assessment.disposition == .blocked {
+            return nil
+        }
+
+        let files = try await getModelFiles(modelId: model.modelId)
+        guard !files.isEmpty else { return nil }
+
+        let selectedFiles: [GGUFInfo]
+        if let requestedFilename = requestedFilename?.trimmingCharacters(in: .whitespacesAndNewlines), !requestedFilename.isEmpty {
+            selectedFiles = files.filter { $0.filename.caseInsensitiveCompare(requestedFilename) == .orderedSame }
+        } else {
+            selectedFiles = files
+        }
+
+        guard !selectedFiles.isEmpty else { return nil }
+
+        return selectedFiles
+            .compactMap { file -> HuggingFaceCandidate? in
+                let compatibility = compatibilityReport(for: file.size, runtimeProfile: runtimeProfile)
+                if !includeCautionaryModels && compatibility.level == .unavailable {
+                    return nil
+                }
+
+                return HuggingFaceCandidate(
+                    model: model,
+                    file: file,
+                    assessment: assessment,
+                    compatibility: compatibility
+                )
+            }
+            .sorted { self.compareCandidates($0, $1) }
+            .first
+    }
+
+    private func compareCandidates(_ lhs: HuggingFaceCandidate, _ rhs: HuggingFaceCandidate) -> Bool {
+        let lhsDispositionRank = dispositionRank(lhs.assessment.disposition)
+        let rhsDispositionRank = dispositionRank(rhs.assessment.disposition)
+        if lhsDispositionRank != rhsDispositionRank {
+            return lhsDispositionRank < rhsDispositionRank
+        }
+
+        let lhsCompatibilityRank = compatibilityRank(lhs.compatibility.level)
+        let rhsCompatibilityRank = compatibilityRank(rhs.compatibility.level)
+        if lhsCompatibilityRank != rhsCompatibilityRank {
+            return lhsCompatibilityRank < rhsCompatibilityRank
+        }
+
+        let lhsQuantizationRank = quantizationRank(for: lhs.file.quantization)
+        let rhsQuantizationRank = quantizationRank(for: rhs.file.quantization)
+        if lhsQuantizationRank != rhsQuantizationRank {
+            return lhsQuantizationRank < rhsQuantizationRank
+        }
+
+        let lhsSize = lhs.file.size ?? .max
+        let rhsSize = rhs.file.size ?? .max
+        if lhsSize != rhsSize {
+            return lhsSize < rhsSize
+        }
+
+        if lhs.model.downloads != rhs.model.downloads {
+            return (lhs.model.downloads ?? 0) > (rhs.model.downloads ?? 0)
+        }
+
+        return lhs.model.modelId.localizedCaseInsensitiveCompare(rhs.model.modelId) == .orderedAscending
+    }
+
+    private func dispositionRank(_ disposition: HuggingFaceRepositoryDisposition) -> Int {
+        switch disposition {
+        case .recommended:
+            return 0
+        case .caution:
+            return 1
+        case .blocked:
+            return 2
+        }
+    }
+
+    private func compatibilityRank(_ level: ModelCompatibilityLevel) -> Int {
+        switch level {
+        case .recommended:
+            return 0
+        case .supported:
+            return 1
+        case .unknown:
+            return 2
+        case .unavailable:
+            return 3
+        }
+    }
+
+    private func quantizationRank(for quantization: String?) -> Int {
+        switch quantization?.uppercased() {
+        case "Q4_K_M", "Q4_K_S", "Q4_0":
+            return 0
+        case "Q5_K_M", "Q5_K_S", "Q5_0", "Q6_K":
+            return 1
+        case "Q3_K_M", "Q3_K_S", "Q3_K_L", "Q2_K":
+            return 2
+        case "Q8_0", "F16", "FP16", "FP32":
+            return 3
+        default:
+            return 4
+        }
+    }
+
+    private func compatibilityReport(
+        for sizeBytes: Int64?,
+        runtimeProfile: DeviceRuntimeProfile
+    ) -> CompatibilityReport {
+        guard let sizeBytes, sizeBytes > 0 else {
+            return CompatibilityReport(
+                backendKind: .ggufLlama,
+                level: .unknown,
+                title: "Unknown Size",
+                message: "This GGUF file has no size metadata yet."
+            )
+        }
+
+        if sizeBytes <= runtimeProfile.recommendedGGUFBudgetBytes {
+            return CompatibilityReport(
+                backendKind: .ggufLlama,
+                level: .recommended,
+                title: "Recommended",
+                message: "This GGUF file is within the recommended budget for \(runtimeProfile.deviceLabel)."
+            )
+        }
+
+        if sizeBytes <= runtimeProfile.supportedGGUFBudgetBytes {
+            return CompatibilityReport(
+                backendKind: .ggufLlama,
+                level: .supported,
+                title: "May Run",
+                message: "This GGUF file is larger than recommended for \(runtimeProfile.deviceLabel), but it still has a realistic chance of loading."
+            )
+        }
+
+        return CompatibilityReport(
+            backendKind: .ggufLlama,
+            level: .unavailable,
+            title: "Too Large",
+            message: "This GGUF file is above the likely working size for \(runtimeProfile.deviceLabel)."
+        )
     }
 }
 

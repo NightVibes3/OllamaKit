@@ -4,6 +4,10 @@ import Foundation
 import UIKit
 #endif
 
+#if canImport(Metal)
+import Metal
+#endif
+
 #if canImport(FoundationModels)
 import FoundationModels
 #endif
@@ -12,6 +16,10 @@ public actor DeviceCapabilityService {
     public static let shared = DeviceCapabilityService()
 
     public func currentProfile() -> DeviceProfile {
+        currentRuntimeProfile().compatibilityProfile
+    }
+
+    public func currentRuntimeProfile() -> DeviceRuntimeProfile {
         let physicalMemory = Int64(ProcessInfo.processInfo.physicalMemory)
         let machineIdentifier = machineIdentifier()
         let recommendedBudget = max(
@@ -22,14 +30,18 @@ public actor DeviceCapabilityService {
             min(Int64(Double(physicalMemory) * 0.42), physicalMemory - 2_000_000_000),
             recommendedBudget
         )
+        let metalDevice = systemMetalDevice()
 
-        return DeviceProfile(
+        return DeviceRuntimeProfile(
             machineIdentifier: machineIdentifier,
             chipFamily: chipFamily(for: machineIdentifier),
             systemVersion: systemVersionString(),
             physicalMemoryBytes: physicalMemory,
+            interfaceKind: interfaceKind(),
             recommendedGGUFBudgetBytes: recommendedBudget,
-            supportedGGUFBudgetBytes: supportedBudget
+            supportedGGUFBudgetBytes: supportedBudget,
+            hasMetalDevice: metalDevice != nil,
+            metalDeviceName: metalDevice?.name
         )
     }
 
@@ -45,7 +57,7 @@ public actor DeviceCapabilityService {
     }
 
     public func compatibilityForGGUFSize(_ sizeBytes: Int64?) async -> CompatibilityReport {
-        let profile = currentProfile()
+        let profile = currentRuntimeProfile()
         guard let sizeBytes, sizeBytes > 0 else {
             return CompatibilityReport(
                 backendKind: .ggufLlama,
@@ -232,6 +244,31 @@ public actor DeviceCapabilityService {
     private func systemVersionString() -> String {
         let version = ProcessInfo.processInfo.operatingSystemVersion
         return "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)"
+    }
+
+    private func interfaceKind() -> DeviceInterfaceKind {
+        #if canImport(UIKit)
+        switch UIDevice.current.userInterfaceIdiom {
+        case .phone:
+            return .phone
+        case .pad:
+            return .pad
+        case .mac:
+            return .mac
+        default:
+            return .other
+        }
+        #else
+        return .other
+        #endif
+    }
+
+    private func systemMetalDevice() -> MTLDevice? {
+        #if canImport(Metal)
+        MTLCreateSystemDefaultDevice()
+        #else
+        nil
+        #endif
     }
 
     private func chipFamily(for machineIdentifier: String) -> String {

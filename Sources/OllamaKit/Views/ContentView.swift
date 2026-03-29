@@ -33,6 +33,14 @@ struct ContentView: View {
                 Label("Server", systemImage: "network")
             }
             .tag(2)
+
+            NavigationStack {
+                AgentView()
+            }
+            .tabItem {
+                Label("Agent", systemImage: "terminal.fill")
+            }
+            .tag(3)
             
             // Settings Tab
             NavigationStack {
@@ -41,7 +49,7 @@ struct ContentView: View {
             .tabItem {
                 Label("Settings", systemImage: "gear")
             }
-            .tag(3)
+            .tag(4)
         }
         .tint(.accentColor)
         .preferredColorScheme(settings.darkMode ? .dark : .light)

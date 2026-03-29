@@ -34,6 +34,490 @@ public enum ModelCompatibilityLevel: String, Codable, CaseIterable, Sendable {
     }
 }
 
+public enum ModelValidationStatus: String, Codable, CaseIterable, Sendable {
+    case unknown
+    case pending
+    case validated
+    case failed
+
+    public var isRunnable: Bool {
+        self == .validated
+    }
+}
+
+public enum DeviceInterfaceKind: String, Codable, CaseIterable, Sendable {
+    case phone
+    case pad
+    case mac
+    case other
+}
+
+public enum ServerSupportedRoute: String, Codable, CaseIterable, Hashable, Sendable {
+    case apiTags = "/api/tags"
+    case apiShow = "/api/show"
+    case apiGenerate = "/api/generate"
+    case apiChat = "/api/chat"
+    case apiEmbed = "/api/embed"
+    case apiPull = "/api/pull"
+    case apiDelete = "/api/delete"
+    case apiPS = "/api/ps"
+    case v1Models = "/v1/models"
+    case v1Completions = "/v1/completions"
+    case v1ChatCompletions = "/v1/chat/completions"
+    case v1Embeddings = "/v1/embeddings"
+    case v1Responses = "/v1/responses"
+}
+
+public struct ServerModelCapabilities: Codable, Hashable, Sendable {
+    public var textGeneration: Bool
+    public var chat: Bool
+    public var streaming: Bool
+    public var embeddings: Bool
+    public var toolCalling: Bool
+    public var reasoningControls: Bool
+    public var imageInput: Bool
+    public var audioInput: Bool
+    public var videoInput: Bool
+    public var multilingual: Bool
+    public var supportedRoutes: [ServerSupportedRoute]
+
+    public init(
+        textGeneration: Bool = false,
+        chat: Bool = false,
+        streaming: Bool = false,
+        embeddings: Bool = false,
+        toolCalling: Bool = false,
+        reasoningControls: Bool = false,
+        imageInput: Bool = false,
+        audioInput: Bool = false,
+        videoInput: Bool = false,
+        multilingual: Bool = false,
+        supportedRoutes: [ServerSupportedRoute] = []
+    ) {
+        self.textGeneration = textGeneration
+        self.chat = chat
+        self.streaming = streaming
+        self.embeddings = embeddings
+        self.toolCalling = toolCalling
+        self.reasoningControls = reasoningControls
+        self.imageInput = imageInput
+        self.audioInput = audioInput
+        self.videoInput = videoInput
+        self.multilingual = multilingual
+        self.supportedRoutes = supportedRoutes
+    }
+
+    public static func conservativeDefaults(
+        backendKind: ModelBackendKind,
+        sourceModelID: String,
+        displayName: String,
+        capabilitySummary: ModelCapabilitySummary,
+        hintedMultilingual: Bool = false
+    ) -> ServerModelCapabilities {
+        let signals = [sourceModelID, displayName, capabilitySummary.notes ?? ""]
+            .joined(separator: " ")
+            .lowercased()
+
+        let looksLikeEmbeddingModel = ["embedding", "feature-extraction", "rerank", "retrieval"]
+            .contains { signals.contains($0) }
+
+        let embeddings = looksLikeEmbeddingModel
+        let textGeneration = !looksLikeEmbeddingModel
+        let chat = textGeneration
+        let streaming = textGeneration && capabilitySummary.supportsStreaming
+        let multilingual = hintedMultilingual || signals.contains("multilingual")
+
+        var supportedRoutes: [ServerSupportedRoute] = [
+            .apiShow,
+            .apiPull,
+            .apiDelete,
+            .apiPS,
+            .apiTags,
+            .v1Models
+        ]
+
+        if textGeneration {
+            supportedRoutes.append(contentsOf: [
+                .apiGenerate,
+                .apiChat,
+                .v1Completions,
+                .v1ChatCompletions,
+                .v1Responses
+            ])
+        }
+
+        if embeddings {
+            supportedRoutes.append(contentsOf: [
+                .apiEmbed,
+                .v1Embeddings
+            ])
+        }
+
+        return ServerModelCapabilities(
+            textGeneration: textGeneration,
+            chat: chat,
+            streaming: streaming,
+            embeddings: embeddings,
+            toolCalling: false,
+            reasoningControls: false,
+            imageInput: false,
+            audioInput: false,
+            videoInput: false,
+            multilingual: multilingual,
+            supportedRoutes: supportedRoutes
+        )
+    }
+}
+
+public enum AgentToolCapabilityKey: String, Codable, CaseIterable, Hashable, Sendable {
+    case browserRead = "browser_read"
+    case browserActions = "browser_actions"
+    case internetRead = "internet_read"
+    case internetWrite = "internet_write"
+    case workspaceRead = "workspace_read"
+    case workspaceWrite = "workspace_write"
+    case codeTools = "code_tools"
+    case jsRuntime = "js_runtime"
+    case pythonRuntime = "python_runtime"
+    case nodeRuntime = "node_runtime"
+    case gitRead = "git_read"
+    case gitWrite = "git_write"
+    case githubAccess = "github_access"
+    case remoteCI = "remote_ci"
+    case bundleEdits = "bundle_edits"
+}
+
+public struct ModelAgentCapabilityOverride: Codable, Hashable, Sendable {
+    public var browserRead: Bool?
+    public var browserActions: Bool?
+    public var internetRead: Bool?
+    public var internetWrite: Bool?
+    public var workspaceRead: Bool?
+    public var workspaceWrite: Bool?
+    public var codeTools: Bool?
+    public var jsRuntime: Bool?
+    public var pythonRuntime: Bool?
+    public var nodeRuntime: Bool?
+    public var gitRead: Bool?
+    public var gitWrite: Bool?
+    public var githubAccess: Bool?
+    public var remoteCI: Bool?
+    public var bundleEdits: Bool?
+
+    public init(
+        browserRead: Bool? = nil,
+        browserActions: Bool? = nil,
+        internetRead: Bool? = nil,
+        internetWrite: Bool? = nil,
+        workspaceRead: Bool? = nil,
+        workspaceWrite: Bool? = nil,
+        codeTools: Bool? = nil,
+        jsRuntime: Bool? = nil,
+        pythonRuntime: Bool? = nil,
+        nodeRuntime: Bool? = nil,
+        gitRead: Bool? = nil,
+        gitWrite: Bool? = nil,
+        githubAccess: Bool? = nil,
+        remoteCI: Bool? = nil,
+        bundleEdits: Bool? = nil
+    ) {
+        self.browserRead = browserRead
+        self.browserActions = browserActions
+        self.internetRead = internetRead
+        self.internetWrite = internetWrite
+        self.workspaceRead = workspaceRead
+        self.workspaceWrite = workspaceWrite
+        self.codeTools = codeTools
+        self.jsRuntime = jsRuntime
+        self.pythonRuntime = pythonRuntime
+        self.nodeRuntime = nodeRuntime
+        self.gitRead = gitRead
+        self.gitWrite = gitWrite
+        self.githubAccess = githubAccess
+        self.remoteCI = remoteCI
+        self.bundleEdits = bundleEdits
+    }
+
+    public var isEmpty: Bool {
+        AgentToolCapabilityKey.allCases.allSatisfy { value(for: $0) == nil }
+    }
+
+    public func value(for capability: AgentToolCapabilityKey) -> Bool? {
+        switch capability {
+        case .browserRead:
+            return browserRead
+        case .browserActions:
+            return browserActions
+        case .internetRead:
+            return internetRead
+        case .internetWrite:
+            return internetWrite
+        case .workspaceRead:
+            return workspaceRead
+        case .workspaceWrite:
+            return workspaceWrite
+        case .codeTools:
+            return codeTools
+        case .jsRuntime:
+            return jsRuntime
+        case .pythonRuntime:
+            return pythonRuntime
+        case .nodeRuntime:
+            return nodeRuntime
+        case .gitRead:
+            return gitRead
+        case .gitWrite:
+            return gitWrite
+        case .githubAccess:
+            return githubAccess
+        case .remoteCI:
+            return remoteCI
+        case .bundleEdits:
+            return bundleEdits
+        }
+    }
+
+    public func setting(_ value: Bool?, for capability: AgentToolCapabilityKey) -> ModelAgentCapabilityOverride {
+        var copy = self
+        switch capability {
+        case .browserRead:
+            copy.browserRead = value
+        case .browserActions:
+            copy.browserActions = value
+        case .internetRead:
+            copy.internetRead = value
+        case .internetWrite:
+            copy.internetWrite = value
+        case .workspaceRead:
+            copy.workspaceRead = value
+        case .workspaceWrite:
+            copy.workspaceWrite = value
+        case .codeTools:
+            copy.codeTools = value
+        case .jsRuntime:
+            copy.jsRuntime = value
+        case .pythonRuntime:
+            copy.pythonRuntime = value
+        case .nodeRuntime:
+            copy.nodeRuntime = value
+        case .gitRead:
+            copy.gitRead = value
+        case .gitWrite:
+            copy.gitWrite = value
+        case .githubAccess:
+            copy.githubAccess = value
+        case .remoteCI:
+            copy.remoteCI = value
+        case .bundleEdits:
+            copy.bundleEdits = value
+        }
+        return copy
+    }
+}
+
+public struct ModelAgentCapabilityProfile: Codable, Hashable, Sendable {
+    public var browserRead: Bool
+    public var browserActions: Bool
+    public var internetRead: Bool
+    public var internetWrite: Bool
+    public var workspaceRead: Bool
+    public var workspaceWrite: Bool
+    public var codeTools: Bool
+    public var jsRuntime: Bool
+    public var pythonRuntime: Bool
+    public var nodeRuntime: Bool
+    public var gitRead: Bool
+    public var gitWrite: Bool
+    public var githubAccess: Bool
+    public var remoteCI: Bool
+    public var bundleEdits: Bool
+
+    public init(
+        browserRead: Bool = false,
+        browserActions: Bool = false,
+        internetRead: Bool = false,
+        internetWrite: Bool = false,
+        workspaceRead: Bool = false,
+        workspaceWrite: Bool = false,
+        codeTools: Bool = false,
+        jsRuntime: Bool = false,
+        pythonRuntime: Bool = false,
+        nodeRuntime: Bool = false,
+        gitRead: Bool = false,
+        gitWrite: Bool = false,
+        githubAccess: Bool = false,
+        remoteCI: Bool = false,
+        bundleEdits: Bool = false
+    ) {
+        self.browserRead = browserRead
+        self.browserActions = browserActions
+        self.internetRead = internetRead
+        self.internetWrite = internetWrite
+        self.workspaceRead = workspaceRead
+        self.workspaceWrite = workspaceWrite
+        self.codeTools = codeTools
+        self.jsRuntime = jsRuntime
+        self.pythonRuntime = pythonRuntime
+        self.nodeRuntime = nodeRuntime
+        self.gitRead = gitRead
+        self.gitWrite = gitWrite
+        self.githubAccess = githubAccess
+        self.remoteCI = remoteCI
+        self.bundleEdits = bundleEdits
+    }
+
+    public func supports(_ capability: AgentToolCapabilityKey) -> Bool {
+        switch capability {
+        case .browserRead:
+            return browserRead
+        case .browserActions:
+            return browserActions
+        case .internetRead:
+            return internetRead
+        case .internetWrite:
+            return internetWrite
+        case .workspaceRead:
+            return workspaceRead
+        case .workspaceWrite:
+            return workspaceWrite
+        case .codeTools:
+            return codeTools
+        case .jsRuntime:
+            return jsRuntime
+        case .pythonRuntime:
+            return pythonRuntime
+        case .nodeRuntime:
+            return nodeRuntime
+        case .gitRead:
+            return gitRead
+        case .gitWrite:
+            return gitWrite
+        case .githubAccess:
+            return githubAccess
+        case .remoteCI:
+            return remoteCI
+        case .bundleEdits:
+            return bundleEdits
+        }
+    }
+
+    public func setting(_ value: Bool, for capability: AgentToolCapabilityKey) -> ModelAgentCapabilityProfile {
+        var copy = self
+        switch capability {
+        case .browserRead:
+            copy.browserRead = value
+        case .browserActions:
+            copy.browserActions = value
+        case .internetRead:
+            copy.internetRead = value
+        case .internetWrite:
+            copy.internetWrite = value
+        case .workspaceRead:
+            copy.workspaceRead = value
+        case .workspaceWrite:
+            copy.workspaceWrite = value
+        case .codeTools:
+            copy.codeTools = value
+        case .jsRuntime:
+            copy.jsRuntime = value
+        case .pythonRuntime:
+            copy.pythonRuntime = value
+        case .nodeRuntime:
+            copy.nodeRuntime = value
+        case .gitRead:
+            copy.gitRead = value
+        case .gitWrite:
+            copy.gitWrite = value
+        case .githubAccess:
+            copy.githubAccess = value
+        case .remoteCI:
+            copy.remoteCI = value
+        case .bundleEdits:
+            copy.bundleEdits = value
+        }
+        return copy
+    }
+
+    public func applying(_ override: ModelAgentCapabilityOverride?) -> ModelAgentCapabilityProfile {
+        guard let override else { return self }
+
+        var copy = self
+        for capability in AgentToolCapabilityKey.allCases {
+            if let value = override.value(for: capability) {
+                copy = copy.setting(value, for: capability)
+            }
+        }
+        return copy
+    }
+
+    public static func conservativeDefaults(
+        backendKind: ModelBackendKind,
+        sourceModelID: String,
+        displayName: String,
+        capabilitySummary: ModelCapabilitySummary,
+        serverCapabilities: ServerModelCapabilities? = nil
+    ) -> ModelAgentCapabilityProfile {
+        let signals = [sourceModelID, displayName, capabilitySummary.notes ?? ""]
+            .joined(separator: " ")
+            .lowercased()
+
+        let signalTerms = Set(signals.split { !$0.isLetter && !$0.isNumber }.map(String.init))
+        let containsAny: (Set<String>) -> Bool = { needles in
+            !signalTerms.isDisjoint(with: needles) || needles.contains { signals.contains($0) }
+        }
+
+        let embeddingSignals: Set<String> = [
+            "embedding", "embeddings", "rerank", "retrieval", "feature-extraction",
+            "featureextraction", "sentence-similarity", "similarity"
+        ]
+        let codingSignals: Set<String> = [
+            "code", "coder", "coding", "programmer", "programming", "devstral",
+            "codestral", "starcoder", "deepseek-coder", "qwen2.5-coder", "swift"
+        ]
+        let conversationalSignals: Set<String> = [
+            "chat", "instruct", "assistant", "conversation", "conversational"
+        ]
+        let agentSignals: Set<String> = [
+            "agent", "tool", "tools", "function", "browser", "search", "web"
+        ]
+
+        let looksLikeEmbedding = serverCapabilities?.embeddings == true || containsAny(embeddingSignals)
+        let looksConversational = serverCapabilities?.chat == true || containsAny(conversationalSignals)
+        let looksGenerative = !looksLikeEmbedding && (serverCapabilities?.textGeneration == true || looksConversational || backendKind == .appleFoundation)
+        let looksCoder = containsAny(codingSignals)
+        let looksAgentic = serverCapabilities?.toolCalling == true || containsAny(agentSignals)
+
+        guard looksGenerative else {
+            return ModelAgentCapabilityProfile()
+        }
+
+        let readResearch = looksConversational || looksCoder || backendKind == .appleFoundation || looksAgentic
+        let allowCode = looksCoder || looksConversational || backendKind == .appleFoundation
+        let allowWrites = looksConversational || looksCoder || backendKind == .appleFoundation
+        let allowNetworkWrites = looksCoder || looksAgentic
+        let allowGitWrites = looksCoder || looksAgentic
+        let allowRemoteCI = looksCoder || looksAgentic || backendKind == .appleFoundation
+
+        return ModelAgentCapabilityProfile(
+            browserRead: readResearch,
+            browserActions: allowNetworkWrites,
+            internetRead: readResearch,
+            internetWrite: allowNetworkWrites,
+            workspaceRead: true,
+            workspaceWrite: allowWrites,
+            codeTools: allowCode,
+            jsRuntime: allowCode,
+            pythonRuntime: allowCode,
+            nodeRuntime: looksCoder,
+            gitRead: allowCode,
+            gitWrite: allowGitWrites,
+            githubAccess: readResearch,
+            remoteCI: allowRemoteCI,
+            bundleEdits: false
+        )
+    }
+}
+
 public struct ModelCapabilitySummary: Codable, Hashable, Sendable {
     public var sizeBytes: Int64
     public var quantization: String
@@ -80,6 +564,7 @@ public struct ModelPackageManifest: Codable, Hashable, Sendable {
     public var backendKind: ModelBackendKind
     public var minimumOSVersion: String?
     public var capabilitySummary: ModelCapabilitySummary
+    public var serverCapabilities: ServerModelCapabilities?
     public var files: [ModelPackageFile]
 
     public init(
@@ -89,6 +574,7 @@ public struct ModelPackageManifest: Codable, Hashable, Sendable {
         backendKind: ModelBackendKind,
         minimumOSVersion: String? = nil,
         capabilitySummary: ModelCapabilitySummary,
+        serverCapabilities: ServerModelCapabilities? = nil,
         files: [ModelPackageFile]
     ) {
         self.formatVersion = formatVersion
@@ -97,6 +583,7 @@ public struct ModelPackageManifest: Codable, Hashable, Sendable {
         self.backendKind = backendKind
         self.minimumOSVersion = minimumOSVersion
         self.capabilitySummary = capabilitySummary
+        self.serverCapabilities = serverCapabilities
         self.files = files
     }
 }
@@ -112,8 +599,12 @@ public struct ModelCatalogEntry: Codable, Hashable, Identifiable, Sendable {
     public var manifestPath: String?
     public var importSource: ModelImportSource
     public var isServerExposed: Bool
+    public var validationStatus: ModelValidationStatus?
+    public var validationMessage: String?
+    public var validatedAt: Date?
     public var aliases: [String]
     public var capabilitySummary: ModelCapabilitySummary
+    public var serverCapabilities: ServerModelCapabilities?
     public var createdAt: Date
     public var updatedAt: Date
 
@@ -130,8 +621,12 @@ public struct ModelCatalogEntry: Codable, Hashable, Identifiable, Sendable {
         manifestPath: String? = nil,
         importSource: ModelImportSource,
         isServerExposed: Bool = true,
+        validationStatus: ModelValidationStatus? = nil,
+        validationMessage: String? = nil,
+        validatedAt: Date? = nil,
         aliases: [String] = [],
         capabilitySummary: ModelCapabilitySummary,
+        serverCapabilities: ServerModelCapabilities? = nil,
         createdAt: Date = .now,
         updatedAt: Date = .now
     ) {
@@ -145,8 +640,12 @@ public struct ModelCatalogEntry: Codable, Hashable, Identifiable, Sendable {
         self.manifestPath = manifestPath
         self.importSource = importSource
         self.isServerExposed = isServerExposed
+        self.validationStatus = validationStatus
+        self.validationMessage = validationMessage
+        self.validatedAt = validatedAt
         self.aliases = aliases
         self.capabilitySummary = capabilitySummary
+        self.serverCapabilities = serverCapabilities
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -176,6 +675,45 @@ public struct ModelCatalogEntry: Codable, Hashable, Identifiable, Sendable {
 
     public var runtimeContextLength: Int {
         max(capabilitySummary.contextLength, 512)
+    }
+
+    public var effectiveValidationStatus: ModelValidationStatus {
+        if let validationStatus {
+            return validationStatus
+        }
+
+        switch backendKind {
+        case .ggufLlama:
+            return .unknown
+        case .coreMLPackage, .appleFoundation:
+            return .validated
+        }
+    }
+
+    public var isValidatedRunnable: Bool {
+        switch backendKind {
+        case .ggufLlama:
+            guard effectiveValidationStatus.isRunnable, let localFileURL else { return false }
+            return FileManager.default.fileExists(atPath: localFileURL.path)
+        case .coreMLPackage:
+            return CoreMLPackageLocator.looksRunnable(packageRootPath: packageRootPath)
+        case .appleFoundation:
+            return effectiveValidationStatus.isRunnable
+        }
+    }
+
+    public var isServerRunnable: Bool {
+        isServerExposed && isValidatedRunnable
+    }
+
+    public var effectiveServerCapabilities: ServerModelCapabilities {
+        serverCapabilities
+            ?? ServerModelCapabilities.conservativeDefaults(
+                backendKind: backendKind,
+                sourceModelID: sourceModelID,
+                displayName: displayName,
+                capabilitySummary: capabilitySummary
+            )
     }
 
     public func matchesReference(_ candidate: String) -> Bool {
@@ -271,15 +809,123 @@ public struct RuntimePreferences: Hashable, Sendable {
         self.keepModelInMemory = keepModelInMemory
         self.autoOffloadMinutes = max(autoOffloadMinutes, 1)
     }
+
+    public static func validationBaseline(contextLength: Int = 2048) -> RuntimePreferences {
+        RuntimePreferences(
+            contextLength: min(max(contextLength, 512), 2048),
+            gpuLayers: 0,
+            threads: max(min(ProcessInfo.processInfo.activeProcessorCount, 4), 1),
+            batchSize: 128,
+            flashAttentionEnabled: false,
+            mmapEnabled: true,
+            mlockEnabled: false,
+            keepModelInMemory: false,
+            autoOffloadMinutes: 1
+        )
+    }
+}
+
+public struct ModelValidationOutcome: Hashable, Sendable {
+    public let status: ModelValidationStatus
+    public let message: String?
+    public let validatedAt: Date
+
+    public init(
+        status: ModelValidationStatus,
+        message: String? = nil,
+        validatedAt: Date = .now
+    ) {
+        self.status = status
+        self.message = message?.trimmedForLookup.nonEmpty
+        self.validatedAt = validatedAt
+    }
+
+    public var isRunnable: Bool {
+        status.isRunnable
+    }
+}
+
+public enum ConversationContentPartKind: String, Codable, CaseIterable, Sendable {
+    case text
+    case imageURL = "image_url"
+    case audioURL = "audio_url"
+    case videoURL = "video_url"
+    case fileURL = "file_url"
+}
+
+public struct ConversationContentPart: Codable, Hashable, Sendable {
+    public let kind: ConversationContentPartKind
+    public let text: String?
+    public let url: String?
+    public let mimeType: String?
+    public let detail: String?
+
+    public init(
+        kind: ConversationContentPartKind,
+        text: String? = nil,
+        url: String? = nil,
+        mimeType: String? = nil,
+        detail: String? = nil
+    ) {
+        self.kind = kind
+        self.text = text?.trimmedForLookup.nonEmpty
+        self.url = url?.trimmedForLookup.nonEmpty
+        self.mimeType = mimeType?.trimmedForLookup.nonEmpty
+        self.detail = detail?.trimmedForLookup.nonEmpty
+    }
+
+    public static func text(_ text: String) -> ConversationContentPart {
+        ConversationContentPart(kind: .text, text: text)
+    }
+
+    public var isText: Bool {
+        kind == .text
+    }
+}
+
+public struct InferenceToolDefinition: Codable, Hashable, Sendable {
+    public let name: String
+    public let description: String?
+    public let inputSchemaJSON: String?
+
+    public init(name: String, description: String? = nil, inputSchemaJSON: String? = nil) {
+        self.name = name.trimmedForLookup
+        self.description = description?.trimmedForLookup.nonEmpty
+        self.inputSchemaJSON = inputSchemaJSON?.trimmedForLookup.nonEmpty
+    }
+}
+
+public struct InferenceReasoningOptions: Codable, Hashable, Sendable {
+    public let effort: String?
+    public let summary: String?
+
+    public init(effort: String? = nil, summary: String? = nil) {
+        self.effort = effort?.trimmedForLookup.nonEmpty
+        self.summary = summary?.trimmedForLookup.nonEmpty
+    }
 }
 
 public struct ConversationTurn: Codable, Hashable, Sendable {
     public let role: String
     public let content: String
+    public let parts: [ConversationContentPart]?
 
     public init(role: String, content: String) {
         self.role = role
         self.content = content
+        self.parts = content.trimmedForLookup.isEmpty ? nil : [.text(content)]
+    }
+
+    public init(role: String, parts: [ConversationContentPart]) {
+        self.role = role
+        self.parts = parts.isEmpty ? nil : parts
+        self.content = parts
+            .compactMap(\.text)
+            .joined()
+    }
+
+    public var containsNonTextParts: Bool {
+        parts?.contains(where: { !$0.isText }) ?? false
     }
 }
 
@@ -501,6 +1147,8 @@ public struct InferenceRequest: Sendable {
     public let prompt: String
     public let systemPrompt: String?
     public let conversationTurns: [ConversationTurn]
+    public let tools: [InferenceToolDefinition]
+    public let reasoning: InferenceReasoningOptions?
     public let parameters: SamplingParameters
     public let runtimePreferences: RuntimePreferences
 
@@ -509,6 +1157,8 @@ public struct InferenceRequest: Sendable {
         prompt: String,
         systemPrompt: String? = nil,
         conversationTurns: [ConversationTurn] = [],
+        tools: [InferenceToolDefinition] = [],
+        reasoning: InferenceReasoningOptions? = nil,
         parameters: SamplingParameters = .default,
         runtimePreferences: RuntimePreferences
     ) {
@@ -516,12 +1166,44 @@ public struct InferenceRequest: Sendable {
         self.prompt = prompt
         self.systemPrompt = systemPrompt
         self.conversationTurns = ConversationPrompting.normalizedTurns(conversationTurns)
+        self.tools = tools
+        self.reasoning = reasoning
         self.parameters = parameters
         self.runtimePreferences = runtimePreferences
     }
 
     public var isChatRequest: Bool {
         !conversationTurns.isEmpty
+    }
+
+    public var requestsToolCalling: Bool {
+        !tools.isEmpty
+    }
+
+    public var hasNonTextInputs: Bool {
+        conversationTurns.contains(where: \.containsNonTextParts)
+    }
+
+    public var hasImageInputs: Bool {
+        conversationTurns.contains { turn in
+            turn.parts?.contains(where: { $0.kind == .imageURL }) ?? false
+        }
+    }
+
+    public var hasAudioInputs: Bool {
+        conversationTurns.contains { turn in
+            turn.parts?.contains(where: { $0.kind == .audioURL }) ?? false
+        }
+    }
+
+    public var hasVideoInputs: Bool {
+        conversationTurns.contains { turn in
+            turn.parts?.contains(where: { $0.kind == .videoURL }) ?? false
+        }
+    }
+
+    public var requestsReasoningControls: Bool {
+        reasoning != nil
     }
 }
 
@@ -747,6 +1429,76 @@ public struct DeviceProfile: Hashable, Sendable {
     }
 }
 
+public struct DeviceRuntimeProfile: Hashable, Sendable {
+    public let machineIdentifier: String
+    public let chipFamily: String
+    public let systemVersion: String
+    public let physicalMemoryBytes: Int64
+    public let interfaceKind: DeviceInterfaceKind
+    public let recommendedGGUFBudgetBytes: Int64
+    public let supportedGGUFBudgetBytes: Int64
+    public let hasMetalDevice: Bool
+    public let metalDeviceName: String?
+
+    public init(
+        machineIdentifier: String,
+        chipFamily: String,
+        systemVersion: String,
+        physicalMemoryBytes: Int64,
+        interfaceKind: DeviceInterfaceKind,
+        recommendedGGUFBudgetBytes: Int64,
+        supportedGGUFBudgetBytes: Int64,
+        hasMetalDevice: Bool,
+        metalDeviceName: String? = nil
+    ) {
+        self.machineIdentifier = machineIdentifier
+        self.chipFamily = chipFamily
+        self.systemVersion = systemVersion
+        self.physicalMemoryBytes = physicalMemoryBytes
+        self.interfaceKind = interfaceKind
+        self.recommendedGGUFBudgetBytes = recommendedGGUFBudgetBytes
+        self.supportedGGUFBudgetBytes = supportedGGUFBudgetBytes
+        self.hasMetalDevice = hasMetalDevice
+        self.metalDeviceName = metalDeviceName?.trimmedForLookup.nonEmpty
+    }
+
+    public var deviceLabel: String {
+        switch interfaceKind {
+        case .pad:
+            return "This iPad"
+        case .phone:
+            return "This iPhone"
+        case .mac:
+            return "This Mac"
+        case .other:
+            return "This Device"
+        }
+    }
+
+    public var formattedPhysicalMemory: String {
+        ByteCountFormatter.string(fromByteCount: physicalMemoryBytes, countStyle: .memory)
+    }
+
+    public var formattedRecommendedBudget: String {
+        ByteCountFormatter.string(fromByteCount: recommendedGGUFBudgetBytes, countStyle: .file)
+    }
+
+    public var formattedSupportedBudget: String {
+        ByteCountFormatter.string(fromByteCount: supportedGGUFBudgetBytes, countStyle: .file)
+    }
+
+    public var compatibilityProfile: DeviceProfile {
+        DeviceProfile(
+            machineIdentifier: machineIdentifier,
+            chipFamily: chipFamily,
+            systemVersion: systemVersion,
+            physicalMemoryBytes: physicalMemoryBytes,
+            recommendedGGUFBudgetBytes: recommendedGGUFBudgetBytes,
+            supportedGGUFBudgetBytes: supportedGGUFBudgetBytes
+        )
+    }
+}
+
 public struct CompatibilityReport: Hashable, Sendable {
     public let backendKind: ModelBackendKind
     public let level: ModelCompatibilityLevel
@@ -797,6 +1549,12 @@ public enum SystemModelCatalog {
                 "\(appleFoundationCatalogID)#\(appleFoundationModelName)"
             ],
             capabilitySummary: capability,
+            serverCapabilities: ServerModelCapabilities.conservativeDefaults(
+                backendKind: .appleFoundation,
+                sourceModelID: appleFoundationCatalogID,
+                displayName: appleFoundationModelName,
+                capabilitySummary: capability
+            ),
             createdAt: .distantPast,
             updatedAt: .distantPast
         )
