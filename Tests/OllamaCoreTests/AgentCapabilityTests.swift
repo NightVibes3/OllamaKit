@@ -59,10 +59,12 @@ final class AgentCapabilityTests: XCTestCase {
         XCTAssertTrue(profile.codeTools)
         XCTAssertTrue(profile.jsRuntime)
         XCTAssertTrue(profile.pythonRuntime)
+        XCTAssertTrue(profile.swiftRuntime)
         XCTAssertTrue(profile.gitRead)
         XCTAssertTrue(profile.gitWrite)
         XCTAssertTrue(profile.githubAccess)
         XCTAssertTrue(profile.remoteCI)
+        XCTAssertTrue(profile.managedRelayAccess)
         XCTAssertFalse(profile.bundleEdits)
     }
 
@@ -78,10 +80,12 @@ final class AgentCapabilityTests: XCTestCase {
             jsRuntime: true,
             pythonRuntime: true,
             nodeRuntime: false,
+            swiftRuntime: false,
             gitRead: true,
             gitWrite: false,
             githubAccess: true,
             remoteCI: false,
+            managedRelayAccess: false,
             bundleEdits: false
         )
 
@@ -90,6 +94,8 @@ final class AgentCapabilityTests: XCTestCase {
             internetWrite: true,
             gitWrite: true,
             remoteCI: true,
+            swiftRuntime: true,
+            managedRelayAccess: true,
             bundleEdits: false
         )
 
@@ -100,6 +106,8 @@ final class AgentCapabilityTests: XCTestCase {
         XCTAssertTrue(effective.internetWrite)
         XCTAssertTrue(effective.gitWrite)
         XCTAssertTrue(effective.remoteCI)
+        XCTAssertTrue(effective.swiftRuntime)
+        XCTAssertTrue(effective.managedRelayAccess)
         XCTAssertFalse(effective.bundleEdits)
     }
 }

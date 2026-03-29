@@ -555,6 +555,20 @@ struct PowerAgentSettingsSection: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 8) {
+                Text("Build Variant")
+                    .font(.system(size: 16, weight: .medium))
+                Text(settings.buildVariant.title)
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Text("Stock builds never expose the live bundle workspace. Jailbreak builds still require the runtime writable-bundle check to pass.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 12)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
                 Text("Browser Home URL")
                     .font(.system(size: 16, weight: .medium))
                 TextField("https://github.com", text: $settings.agentBrowserHomeURL)
@@ -579,11 +593,14 @@ struct PowerAgentSettingsSection: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Expert Bundle Mode")
                         .font(.system(size: 16, weight: .medium))
-                    Text("Only relevant on writable jailbreak-style installs. Allows broader live bundle resource edits, but still does not enable binary Mach-O rewriting.")
+                    Text(settings.isJailbreakBuild
+                         ? "Only relevant on writable jailbreak-style installs. Allows broader live bundle resource edits, but still does not enable binary Mach-O rewriting."
+                         : "Unavailable in the stock sideload build. Install the jailbreak IPA to enable live bundle resource editing.")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                 }
             }
+            .disabled(!settings.isJailbreakBuild)
             .padding(.vertical, 12)
 
             Divider()

@@ -271,10 +271,12 @@ private let agentCapabilityDefinitions: [AgentCapabilitySettingDefinition] = [
     AgentCapabilitySettingDefinition(capability: .jsRuntime, title: "JavaScript Runtime", detail: "Execute JavaScript locally with JavaScriptCore."),
     AgentCapabilitySettingDefinition(capability: .pythonRuntime, title: "Python Runtime", detail: "Run embedded Python when that runtime is bundled."),
     AgentCapabilitySettingDefinition(capability: .nodeRuntime, title: "Node Runtime", detail: "Run embedded Node.js tooling when that runtime is bundled."),
-    AgentCapabilitySettingDefinition(capability: .gitRead, title: "Git Read", detail: "Inspect repository state and clone snapshots."),
-    AgentCapabilitySettingDefinition(capability: .gitWrite, title: "Git Write", detail: "Create branches and push workspace changes to GitHub."),
+    AgentCapabilitySettingDefinition(capability: .swiftRuntime, title: "Swift Runtime", detail: "Run embedded Swift script or SwiftPM tooling when that runtime is bundled."),
+    AgentCapabilitySettingDefinition(capability: .gitRead, title: "Git Read", detail: "Inspect repository state and clone repository workspaces."),
+    AgentCapabilitySettingDefinition(capability: .gitWrite, title: "Git Write", detail: "Create branches and push workspace changes through the configured git/GitHub bridge."),
     AgentCapabilitySettingDefinition(capability: .githubAccess, title: "GitHub Access", detail: "Use GitHub repository, code search, issues, and PR APIs."),
     AgentCapabilitySettingDefinition(capability: .remoteCI, title: "Remote CI", detail: "Read or trigger GitHub Actions runs for jobs the phone cannot do locally."),
+    AgentCapabilitySettingDefinition(capability: .managedRelayAccess, title: "Managed Relay", detail: "Inspect or reconnect the managed public relay when this build exposes it."),
     AgentCapabilitySettingDefinition(capability: .bundleEdits, title: "Bundle Edits", detail: "Allow live bundle resource edits on writable jailbreak-style installs.")
 ]
 
@@ -345,6 +347,7 @@ struct ModelFactChip: View {
     }
 }
 
+@MainActor
 struct DownloadedModelRow: View {
     @ObservedObject private var modelRunner = ModelRunner.shared
     let model: ModelSnapshot
@@ -516,12 +519,14 @@ struct DownloadedModelRow: View {
     }
 
     private func presentModelInfo() {
+        let effectiveCapabilities = AgentToolRuntime.shared.effectiveCapabilitiesPreview(for: model) ?? model.effectiveAgentCapabilities
         var details = [
             "Model: \(model.displayName)",
             "Backend: \(model.backendDisplayName)",
             "Quantization: \(model.quantization)",
             "Context: \(model.runtimeContextLength)",
-            "Identifier: \(model.catalogId)"
+            "Identifier: \(model.catalogId)",
+            "Build Variant: \(AppSettings.shared.buildVariant.title)"
         ]
 
         if model.backendKind == .ggufLlama {
@@ -529,9 +534,12 @@ struct DownloadedModelRow: View {
         }
 
         details.append("Agent Override: \(model.hasAgentCapabilityOverride ? "Manual" : "Default")")
-        details.append("Agent Browser Read: \(model.effectiveAgentCapabilities.browserRead ? "On" : "Off")")
-        details.append("Agent Workspace Write: \(model.effectiveAgentCapabilities.workspaceWrite ? "On" : "Off")")
-        details.append("Agent GitHub Access: \(model.effectiveAgentCapabilities.githubAccess ? "On" : "Off")")
+        details.append("Agent Browser Read: \(effectiveCapabilities.browserRead ? "On" : "Off")")
+        details.append("Agent Workspace Write: \(effectiveCapabilities.workspaceWrite ? "On" : "Off")")
+        details.append("Agent GitHub Access: \(effectiveCapabilities.githubAccess ? "On" : "Off")")
+        details.append("Agent Swift Runtime: \(effectiveCapabilities.swiftRuntime ? "On" : "Off")")
+        details.append("Agent Managed Relay: \(effectiveCapabilities.managedRelayAccess ? "On" : "Off")")
+        details.append("Agent Bundle Edits: \(effectiveCapabilities.bundleEdits ? "On" : "Off")")
 
         if let runtimeAvailabilityMessage = model.runtimeAvailabilityMessage {
             details.append(runtimeAvailabilityMessage)
@@ -568,11 +576,20 @@ struct DownloadedModelRow: View {
     }
 }
 
+@MainActor
 struct ModelAgentCapabilitiesSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var settings = AppSettings.shared
 
     let model: ModelSnapshot
+
+    private var runtimeCapabilities: AgentCapabilityProfile {
+        AgentToolRuntime.shared.runtimeCapabilityPreview()
+    }
+
+    private var effectiveCapabilities: ModelAgentCapabilityProfile {
+        AgentToolRuntime.shared.effectiveCapabilitiesPreview(for: model) ?? model.effectiveAgentCapabilities
+    }
 
     var body: some View {
         NavigationStack {
@@ -584,13 +601,27 @@ struct ModelAgentCapabilitiesSheet: View {
                     capabilityInfoRow(title: "Override", value: model.hasAgentCapabilityOverride ? "Manual" : "Default")
                 }
 
+                Section("Runtime") {
+                    capabilityInfoRow(title: "Build Variant", value: settings.buildVariant.title)
+                    capabilityInfoRow(title: "Runtime Tier", value: runtimeCapabilities.runtimeTier.title)
+                    capabilityInfoRow(title: "Embedded Browser", value: runtimeCapabilities.supportsEmbeddedBrowser ? "Available" : "Unavailable")
+                    capabilityInfoRow(title: "JavaScript", value: runtimeCapabilities.supportsJavaScriptRuntime ? "Available" : "Unavailable")
+                    capabilityInfoRow(title: "Python", value: runtimeCapabilities.supportsPythonRuntime ? "Available" : "Unavailable")
+                    capabilityInfoRow(title: "Node", value: runtimeCapabilities.supportsNodeRuntime ? "Available" : "Unavailable")
+                    capabilityInfoRow(title: "Swift", value: runtimeCapabilities.supportsSwiftRuntime ? "Available" : "Unavailable")
+                    capabilityInfoRow(title: "Managed Relay", value: runtimeCapabilities.supportsManagedRelay ? "Available" : "Unavailable")
+                    capabilityInfoRow(title: "Live Bundle Editing", value: runtimeCapabilities.supportsLiveBundleEditing ? "Available" : "Unavailable")
+                }
+
                 Section("Effective Access") {
-                    capabilityInfoRow(title: "Browser Read", value: model.effectiveAgentCapabilities.browserRead ? "On" : "Off")
-                    capabilityInfoRow(title: "Browser Actions", value: model.effectiveAgentCapabilities.browserActions ? "On" : "Off")
-                    capabilityInfoRow(title: "Workspace Write", value: model.effectiveAgentCapabilities.workspaceWrite ? "On" : "Off")
-                    capabilityInfoRow(title: "GitHub Access", value: model.effectiveAgentCapabilities.githubAccess ? "On" : "Off")
-                    capabilityInfoRow(title: "Remote CI", value: model.effectiveAgentCapabilities.remoteCI ? "On" : "Off")
-                    capabilityInfoRow(title: "Bundle Edits", value: model.effectiveAgentCapabilities.bundleEdits ? "On" : "Off")
+                    capabilityInfoRow(title: "Browser Read", value: effectiveCapabilities.browserRead ? "On" : "Off")
+                    capabilityInfoRow(title: "Browser Actions", value: effectiveCapabilities.browserActions ? "On" : "Off")
+                    capabilityInfoRow(title: "Workspace Write", value: effectiveCapabilities.workspaceWrite ? "On" : "Off")
+                    capabilityInfoRow(title: "GitHub Access", value: effectiveCapabilities.githubAccess ? "On" : "Off")
+                    capabilityInfoRow(title: "Swift Runtime", value: effectiveCapabilities.swiftRuntime ? "On" : "Off")
+                    capabilityInfoRow(title: "Managed Relay", value: effectiveCapabilities.managedRelayAccess ? "On" : "Off")
+                    capabilityInfoRow(title: "Remote CI", value: effectiveCapabilities.remoteCI ? "On" : "Off")
+                    capabilityInfoRow(title: "Bundle Edits", value: effectiveCapabilities.bundleEdits ? "On" : "Off")
                 }
 
                 Section("Overrides") {
@@ -607,7 +638,7 @@ struct ModelAgentCapabilitiesSheet: View {
                                 }
                             }
                             .pickerStyle(.segmented)
-                            Text("Default: \(model.conservativeAgentCapabilities.supports(definition.capability) ? "On" : "Off")")
+                            Text("Policy Default: \(model.conservativeAgentCapabilities.supports(definition.capability) ? "On" : "Off")")
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundStyle(.tertiary)
                         }

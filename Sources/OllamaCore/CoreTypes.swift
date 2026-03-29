@@ -10,6 +10,53 @@ public enum ModelBackendKind: String, Codable, CaseIterable, Sendable {
     case appleFoundation = "apple_foundation"
 }
 
+public enum AppBuildVariant: String, Codable, CaseIterable, Identifiable, Sendable {
+    case stockSideload
+    case jailbreak
+
+    public static let infoDictionaryKey = "OllamaKitBuildVariant"
+    public static let environmentKey = "OLLAMAKIT_BUILD_VARIANT"
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .stockSideload:
+            return "Stock Sideload"
+        case .jailbreak:
+            return "Jailbreak"
+        }
+    }
+
+    public var allowsLiveBundleWorkspace: Bool {
+        self == .jailbreak
+    }
+
+    public var artifactSuffix: String {
+        rawValue
+    }
+
+    public static func resolve(
+        infoDictionary: [String: Any]? = Bundle.main.infoDictionary,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> AppBuildVariant {
+        if let rawValue = environment[Self.environmentKey] ?? infoDictionary?[Self.infoDictionaryKey] as? String,
+           let variant = Self(rawValue: rawValue.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            return variant
+        }
+
+        #if OLLAMAKIT_VARIANT_JAILBREAK
+        return .jailbreak
+        #else
+        return .stockSideload
+        #endif
+    }
+
+    public static var current: AppBuildVariant {
+        resolve()
+    }
+}
+
 public enum ModelImportSource: String, Codable, CaseIterable, Sendable {
     case builtIn
     case huggingFaceDownload
@@ -180,11 +227,49 @@ public enum AgentToolCapabilityKey: String, Codable, CaseIterable, Hashable, Sen
     case jsRuntime = "js_runtime"
     case pythonRuntime = "python_runtime"
     case nodeRuntime = "node_runtime"
+    case swiftRuntime = "swift_runtime"
     case gitRead = "git_read"
     case gitWrite = "git_write"
     case githubAccess = "github_access"
     case remoteCI = "remote_ci"
+    case managedRelayAccess = "managed_relay_access"
     case bundleEdits = "bundle_edits"
+}
+
+public enum ManagedRelayConnectionState: String, Codable, CaseIterable, Hashable, Sendable {
+    case disconnected
+    case registering
+    case connecting
+    case connected
+    case error
+}
+
+public struct ManagedPublicEndpoint: Codable, Hashable, Sendable {
+    public var serviceBaseURL: String
+    public var assignedURL: String
+    public var websocketURL: String
+
+    public init(
+        serviceBaseURL: String = "",
+        assignedURL: String = "",
+        websocketURL: String = ""
+    ) {
+        self.serviceBaseURL = serviceBaseURL
+        self.assignedURL = assignedURL
+        self.websocketURL = websocketURL
+    }
+}
+
+public struct RelayAuthToken: Codable, Hashable, Sendable {
+    public var value: String
+    public var issuedAt: Date?
+    public var expiresAt: Date?
+
+    public init(value: String = "", issuedAt: Date? = nil, expiresAt: Date? = nil) {
+        self.value = value
+        self.issuedAt = issuedAt
+        self.expiresAt = expiresAt
+    }
 }
 
 public struct ModelAgentCapabilityOverride: Codable, Hashable, Sendable {
@@ -198,10 +283,12 @@ public struct ModelAgentCapabilityOverride: Codable, Hashable, Sendable {
     public var jsRuntime: Bool?
     public var pythonRuntime: Bool?
     public var nodeRuntime: Bool?
+    public var swiftRuntime: Bool?
     public var gitRead: Bool?
     public var gitWrite: Bool?
     public var githubAccess: Bool?
     public var remoteCI: Bool?
+    public var managedRelayAccess: Bool?
     public var bundleEdits: Bool?
 
     public init(
@@ -215,10 +302,12 @@ public struct ModelAgentCapabilityOverride: Codable, Hashable, Sendable {
         jsRuntime: Bool? = nil,
         pythonRuntime: Bool? = nil,
         nodeRuntime: Bool? = nil,
+        swiftRuntime: Bool? = nil,
         gitRead: Bool? = nil,
         gitWrite: Bool? = nil,
         githubAccess: Bool? = nil,
         remoteCI: Bool? = nil,
+        managedRelayAccess: Bool? = nil,
         bundleEdits: Bool? = nil
     ) {
         self.browserRead = browserRead
@@ -231,10 +320,12 @@ public struct ModelAgentCapabilityOverride: Codable, Hashable, Sendable {
         self.jsRuntime = jsRuntime
         self.pythonRuntime = pythonRuntime
         self.nodeRuntime = nodeRuntime
+        self.swiftRuntime = swiftRuntime
         self.gitRead = gitRead
         self.gitWrite = gitWrite
         self.githubAccess = githubAccess
         self.remoteCI = remoteCI
+        self.managedRelayAccess = managedRelayAccess
         self.bundleEdits = bundleEdits
     }
 
@@ -264,6 +355,8 @@ public struct ModelAgentCapabilityOverride: Codable, Hashable, Sendable {
             return pythonRuntime
         case .nodeRuntime:
             return nodeRuntime
+        case .swiftRuntime:
+            return swiftRuntime
         case .gitRead:
             return gitRead
         case .gitWrite:
@@ -272,6 +365,8 @@ public struct ModelAgentCapabilityOverride: Codable, Hashable, Sendable {
             return githubAccess
         case .remoteCI:
             return remoteCI
+        case .managedRelayAccess:
+            return managedRelayAccess
         case .bundleEdits:
             return bundleEdits
         }
@@ -300,6 +395,8 @@ public struct ModelAgentCapabilityOverride: Codable, Hashable, Sendable {
             copy.pythonRuntime = value
         case .nodeRuntime:
             copy.nodeRuntime = value
+        case .swiftRuntime:
+            copy.swiftRuntime = value
         case .gitRead:
             copy.gitRead = value
         case .gitWrite:
@@ -308,6 +405,8 @@ public struct ModelAgentCapabilityOverride: Codable, Hashable, Sendable {
             copy.githubAccess = value
         case .remoteCI:
             copy.remoteCI = value
+        case .managedRelayAccess:
+            copy.managedRelayAccess = value
         case .bundleEdits:
             copy.bundleEdits = value
         }
@@ -326,10 +425,12 @@ public struct ModelAgentCapabilityProfile: Codable, Hashable, Sendable {
     public var jsRuntime: Bool
     public var pythonRuntime: Bool
     public var nodeRuntime: Bool
+    public var swiftRuntime: Bool
     public var gitRead: Bool
     public var gitWrite: Bool
     public var githubAccess: Bool
     public var remoteCI: Bool
+    public var managedRelayAccess: Bool
     public var bundleEdits: Bool
 
     public init(
@@ -343,10 +444,12 @@ public struct ModelAgentCapabilityProfile: Codable, Hashable, Sendable {
         jsRuntime: Bool = false,
         pythonRuntime: Bool = false,
         nodeRuntime: Bool = false,
+        swiftRuntime: Bool = false,
         gitRead: Bool = false,
         gitWrite: Bool = false,
         githubAccess: Bool = false,
         remoteCI: Bool = false,
+        managedRelayAccess: Bool = false,
         bundleEdits: Bool = false
     ) {
         self.browserRead = browserRead
@@ -359,10 +462,12 @@ public struct ModelAgentCapabilityProfile: Codable, Hashable, Sendable {
         self.jsRuntime = jsRuntime
         self.pythonRuntime = pythonRuntime
         self.nodeRuntime = nodeRuntime
+        self.swiftRuntime = swiftRuntime
         self.gitRead = gitRead
         self.gitWrite = gitWrite
         self.githubAccess = githubAccess
         self.remoteCI = remoteCI
+        self.managedRelayAccess = managedRelayAccess
         self.bundleEdits = bundleEdits
     }
 
@@ -388,6 +493,8 @@ public struct ModelAgentCapabilityProfile: Codable, Hashable, Sendable {
             return pythonRuntime
         case .nodeRuntime:
             return nodeRuntime
+        case .swiftRuntime:
+            return swiftRuntime
         case .gitRead:
             return gitRead
         case .gitWrite:
@@ -396,6 +503,8 @@ public struct ModelAgentCapabilityProfile: Codable, Hashable, Sendable {
             return githubAccess
         case .remoteCI:
             return remoteCI
+        case .managedRelayAccess:
+            return managedRelayAccess
         case .bundleEdits:
             return bundleEdits
         }
@@ -424,6 +533,8 @@ public struct ModelAgentCapabilityProfile: Codable, Hashable, Sendable {
             copy.pythonRuntime = value
         case .nodeRuntime:
             copy.nodeRuntime = value
+        case .swiftRuntime:
+            copy.swiftRuntime = value
         case .gitRead:
             copy.gitRead = value
         case .gitWrite:
@@ -432,6 +543,8 @@ public struct ModelAgentCapabilityProfile: Codable, Hashable, Sendable {
             copy.githubAccess = value
         case .remoteCI:
             copy.remoteCI = value
+        case .managedRelayAccess:
+            copy.managedRelayAccess = value
         case .bundleEdits:
             copy.bundleEdits = value
         }
@@ -497,6 +610,8 @@ public struct ModelAgentCapabilityProfile: Codable, Hashable, Sendable {
         let allowNetworkWrites = looksCoder || looksAgentic
         let allowGitWrites = looksCoder || looksAgentic
         let allowRemoteCI = looksCoder || looksAgentic || backendKind == .appleFoundation
+        let allowSwiftRuntime = looksCoder || backendKind == .appleFoundation
+        let allowManagedRelay = allowNetworkWrites || looksConversational
 
         return ModelAgentCapabilityProfile(
             browserRead: readResearch,
@@ -509,10 +624,12 @@ public struct ModelAgentCapabilityProfile: Codable, Hashable, Sendable {
             jsRuntime: allowCode,
             pythonRuntime: allowCode,
             nodeRuntime: looksCoder,
+            swiftRuntime: allowSwiftRuntime,
             gitRead: allowCode,
             gitWrite: allowGitWrites,
             githubAccess: readResearch,
             remoteCI: allowRemoteCI,
+            managedRelayAccess: allowManagedRelay,
             bundleEdits: false
         )
     }

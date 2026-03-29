@@ -45,6 +45,409 @@ private struct ParsedInferencePayload {
     let stream: Bool
 }
 
+private struct ManagedRelayRegistrationResponse: Decodable {
+    let deviceID: String
+    let relayToken: String
+    let publicURL: String
+    let websocketURL: String
+}
+
+@MainActor
+final class ManagedRelayService: ObservableObject {
+    static let shared = ManagedRelayService()
+
+    @Published private(set) var state: ManagedRelayConnectionState = .disconnected
+    @Published private(set) var lastError: String?
+    @Published private(set) var lastConnectedAt: Date?
+
+    private var webSocketTask: URLSessionWebSocketTask?
+    private var receiveTask: Task<Void, Never>?
+    private var heartbeatTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
+    private var isStopping = false
+
+    private init() {}
+
+    func startIfNeeded() async {
+        guard AppSettings.shared.serverEnabled,
+              AppSettings.shared.serverExposureMode == .publicManaged
+        else {
+            await stop(reason: "Managed relay disabled.")
+            return
+        }
+
+        guard AppSettings.shared.normalizedManagedRelayBaseURL != nil else {
+            transition(to: .error, message: "Managed relay mode requires a valid relay service URL.")
+            return
+        }
+
+        if state == .connected || state == .connecting || state == .registering {
+            return
+        }
+
+        do {
+            try await connect()
+        } catch {
+            scheduleReconnect(reason: error.localizedDescription)
+        }
+    }
+
+    func reconnect() async {
+        await stop(reason: "Manual relay reconnect requested.")
+        await startIfNeeded()
+    }
+
+    func stop(reason: String) async {
+        isStopping = true
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+        receiveTask?.cancel()
+        receiveTask = nil
+        webSocketTask?.cancel(with: .goingAway, reason: nil)
+        webSocketTask = nil
+        transition(to: .disconnected, message: reason)
+        isStopping = false
+    }
+
+    func agentStatusJSON() -> AgentJSONValue {
+        .object([
+            "state": .string(state.rawValue),
+            "service_base_url": .string(AppSettings.shared.normalizedManagedRelayBaseURL ?? AppSettings.shared.managedRelayBaseURL),
+            "assigned_url": .string(AppSettings.shared.managedRelayAssignedURL),
+            "websocket_url": .string(AppSettings.shared.managedRelayWebSocketURL),
+            "device_id": .string(AppSettings.shared.managedRelayDeviceID),
+            "connected_at": .string(lastConnectedAt.map { ISO8601DateFormatter().string(from: $0) } ?? ""),
+            "last_error": .string(lastError ?? "")
+        ])
+    }
+
+    private func connect() async throws {
+        try await ensureRegistration()
+
+        guard let rawWebSocketURL = URL(string: AppSettings.shared.managedRelayWebSocketURL),
+              var webSocketComponents = URLComponents(url: rawWebSocketURL, resolvingAgainstBaseURL: false)
+        else {
+            throw RelayError.invalidConfiguration("The managed relay did not provide a valid WebSocket URL.")
+        }
+
+        var queryItems = webSocketComponents.queryItems ?? []
+        queryItems.append(URLQueryItem(name: "device_id", value: AppSettings.shared.managedRelayDeviceID))
+        queryItems.append(URLQueryItem(name: "token", value: AppSettings.shared.managedRelayAccessToken))
+        webSocketComponents.queryItems = queryItems
+
+        guard let webSocketURL = webSocketComponents.url else {
+            throw RelayError.invalidConfiguration("The managed relay WebSocket URL could not be composed.")
+        }
+
+        transition(to: .connecting, message: "Connecting to managed relay.")
+
+        let task = URLSession.shared.webSocketTask(with: webSocketURL)
+        webSocketTask = task
+        task.resume()
+
+        try await sendJSON([
+            "type": "device_ready",
+            "device_id": AppSettings.shared.managedRelayDeviceID,
+            "build_variant": AppSettings.shared.buildVariant.rawValue,
+            "server_port": AppSettings.shared.serverPort,
+            "api_key_required": AppSettings.shared.isAPIKeyRequiredForCurrentExposure
+        ])
+
+        lastConnectedAt = .now
+        transition(to: .connected, message: "Managed relay connected.")
+        log(.info, title: "Managed Relay Connected", message: AppSettings.shared.managedRelayAssignedURL)
+
+        receiveTask = Task { [weak self] in
+            await self?.receiveLoop()
+        }
+
+        heartbeatTask = Task { [weak self] in
+            await self?.heartbeatLoop()
+        }
+    }
+
+    private func ensureRegistration() async throws {
+        if AppSettings.shared.managedRelayAccessToken.trimmedForLookup.nonEmpty != nil,
+           AppSettings.shared.managedRelayAssignedURL.trimmedForLookup.nonEmpty != nil,
+           AppSettings.shared.managedRelayWebSocketURL.trimmedForLookup.nonEmpty != nil {
+            return
+        }
+
+        guard let baseURLString = AppSettings.shared.normalizedManagedRelayBaseURL,
+              let baseURL = URL(string: baseURLString)
+        else {
+            throw RelayError.invalidConfiguration("The managed relay service URL is invalid.")
+        }
+
+        transition(to: .registering, message: "Registering device with managed relay.")
+
+        var request = URLRequest(url: baseURL.appendingPathComponent("api/device/register"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let body: [String: Any] = [
+            "device_id": AppSettings.shared.managedRelayDeviceID,
+            "build_variant": AppSettings.shared.buildVariant.rawValue,
+            "local_port": AppSettings.shared.serverPort
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw RelayError.invalidResponse("The managed relay registration did not return an HTTP response.")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let message = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
+            throw RelayError.invalidResponse(message)
+        }
+
+        let decoded = try JSONDecoder().decode(ManagedRelayRegistrationResponse.self, from: data)
+        AppSettings.shared.managedRelayDeviceID = decoded.deviceID
+        AppSettings.shared.managedRelayAccessToken = decoded.relayToken
+        AppSettings.shared.managedRelayAssignedURL = decoded.publicURL
+        AppSettings.shared.managedRelayWebSocketURL = decoded.websocketURL
+    }
+
+    private func receiveLoop() async {
+        while !Task.isCancelled {
+            guard let webSocketTask else { return }
+
+            do {
+                let message = try await receiveMessage(on: webSocketTask)
+                try await handleMessage(message)
+            } catch {
+                guard !isStopping else { return }
+                scheduleReconnect(reason: error.localizedDescription)
+                return
+            }
+        }
+    }
+
+    private func heartbeatLoop() async {
+        while !Task.isCancelled {
+            do {
+                try await Task.sleep(for: .seconds(20))
+                guard let webSocketTask else { return }
+                try await withCheckedThrowingContinuation { continuation in
+                    webSocketTask.sendPing { error in
+                        if let error {
+                            continuation.resume(throwing: error)
+                        } else {
+                            continuation.resume(returning: ())
+                        }
+                    }
+                }
+            } catch {
+                guard !isStopping else { return }
+                scheduleReconnect(reason: error.localizedDescription)
+                return
+            }
+        }
+    }
+
+    private func handleMessage(_ message: URLSessionWebSocketTask.Message) async throws {
+        let data: Data
+        switch message {
+        case .string(let value):
+            data = Data(value.utf8)
+        case .data(let value):
+            data = value
+        @unknown default:
+            throw RelayError.invalidResponse("The managed relay returned an unsupported WebSocket message.")
+        }
+
+        let jsonObject = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+        guard let payload = AgentJSONValue.fromFoundation(jsonObject)?.objectValue,
+              let type = payload["type"]?.stringValue
+        else {
+            throw RelayError.invalidResponse("The managed relay returned an invalid JSON envelope.")
+        }
+
+        switch type {
+        case "ping":
+            try await sendJSON([
+                "type": "pong",
+                "device_id": AppSettings.shared.managedRelayDeviceID
+            ])
+        case "proxy_request":
+            try await forwardRequest(payload: payload)
+        case "registration_refresh":
+            AppSettings.shared.clearManagedRelaySession()
+            try await connect()
+        case "relay_ready":
+            transition(to: .connected, message: payload["message"]?.stringValue ?? "Managed relay ready.")
+        case "error":
+            let message = payload["message"]?.stringValue ?? "Managed relay error."
+            transition(to: .error, message: message)
+            log(.warning, title: "Managed Relay Error", message: message)
+        default:
+            break
+        }
+    }
+
+    private func forwardRequest(payload: [String: AgentJSONValue]) async throws {
+        guard let requestID = payload["request_id"]?.stringValue?.nonEmpty,
+              let method = payload["method"]?.stringValue?.nonEmpty,
+              let path = payload["path"]?.stringValue?.nonEmpty
+        else {
+            throw RelayError.invalidResponse("The relay request envelope was missing required fields.")
+        }
+
+        guard let baseURL = URL(string: AppSettings.shared.localServerURL),
+              let targetURL = URL(string: path, relativeTo: baseURL)?.absoluteURL
+        else {
+            throw RelayError.invalidConfiguration("The local server URL is invalid.")
+        }
+
+        var request = URLRequest(url: targetURL)
+        request.httpMethod = method
+
+        for (key, value) in payload["headers"]?.objectValue ?? [:] {
+            guard let headerValue = value.stringValue else { continue }
+            switch key.lowercased() {
+            case "host", "connection", "content-length", "transfer-encoding":
+                continue
+            default:
+                request.setValue(headerValue, forHTTPHeaderField: key)
+            }
+        }
+
+        if let bodyBase64 = payload["body_base64"]?.stringValue?.nonEmpty,
+           let body = Data(base64Encoded: bodyBase64) {
+            request.httpBody = body
+        }
+
+        do {
+            let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw RelayError.invalidResponse("The local server returned a non-HTTP response.")
+            }
+
+            let headers = http.allHeaderFields.reduce(into: [String: String]()) { partialResult, entry in
+                partialResult[String(describing: entry.key)] = String(describing: entry.value)
+            }
+
+            try await sendJSON([
+                "type": "response_start",
+                "request_id": requestID,
+                "status": http.statusCode,
+                "headers": headers
+            ])
+
+            var buffer = Data()
+            buffer.reserveCapacity(8_192)
+
+            for try await byte in bytes {
+                buffer.append(byte)
+                if buffer.count >= 8_192 {
+                    try await sendJSON([
+                        "type": "response_chunk",
+                        "request_id": requestID,
+                        "chunk_base64": buffer.base64EncodedString()
+                    ])
+                    buffer.removeAll(keepingCapacity: true)
+                }
+            }
+
+            if !buffer.isEmpty {
+                try await sendJSON([
+                    "type": "response_chunk",
+                    "request_id": requestID,
+                    "chunk_base64": buffer.base64EncodedString()
+                ])
+            }
+
+            try await sendJSON([
+                "type": "response_end",
+                "request_id": requestID
+            ])
+        } catch {
+            try await sendJSON([
+                "type": "response_error",
+                "request_id": requestID,
+                "status": 502,
+                "message": error.localizedDescription
+            ])
+            throw error
+        }
+    }
+
+    private func sendJSON(_ object: [String: Any]) async throws {
+        guard let webSocketTask else {
+            throw RelayError.invalidConfiguration("The managed relay socket is not connected.")
+        }
+
+        let data = try JSONSerialization.data(withJSONObject: object, options: [])
+        guard let string = String(data: data, encoding: .utf8) else {
+            throw RelayError.invalidResponse("Failed to encode a relay message.")
+        }
+
+        try await webSocketTask.send(.string(string))
+    }
+
+    private func receiveMessage(on task: URLSessionWebSocketTask) async throws -> URLSessionWebSocketTask.Message {
+        try await withCheckedThrowingContinuation { continuation in
+            task.receive { result in
+                continuation.resume(with: result)
+            }
+        }
+    }
+
+    private func scheduleReconnect(reason: String) {
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+        receiveTask?.cancel()
+        receiveTask = nil
+        webSocketTask?.cancel(with: .goingAway, reason: nil)
+        webSocketTask = nil
+        transition(to: .error, message: reason)
+        log(.warning, title: "Managed Relay Reconnecting", message: reason)
+
+        guard reconnectTask == nil else { return }
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard let self else { return }
+            self.reconnectTask = nil
+            await self.startIfNeeded()
+        }
+    }
+
+    private func transition(to newState: ManagedRelayConnectionState, message: String?) {
+        state = newState
+        lastError = newState == .error ? message : nil
+    }
+
+    private func log(_ level: ServerLogLevel, title: String, message: String) {
+        ServerLogStore.shared.record(
+            ServerLogEntry(
+                level: level,
+                category: .relay,
+                title: title,
+                message: message,
+                metadata: [
+                    "exposure_mode": AppSettings.shared.serverExposureMode.rawValue,
+                    "assigned_url": AppSettings.shared.managedRelayAssignedURL
+                ]
+            )
+        )
+    }
+
+    private enum RelayError: LocalizedError {
+        case invalidConfiguration(String)
+        case invalidResponse(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidConfiguration(let message), .invalidResponse(let message):
+                return message
+            }
+        }
+    }
+}
+
 final class ServerManager {
     static let shared = ServerManager()
     private static let iso8601Formatter = ISO8601DateFormatter()
@@ -160,13 +563,21 @@ final class ServerManager {
             return
         }
 
-        if AppSettings.shared.serverExposureMode == .publicURL,
-           AppSettings.shared.normalizedPublicBaseURL == nil {
+        switch AppSettings.shared.serverExposureMode {
+        case .publicCustom where AppSettings.shared.normalizedPublicBaseURL == nil:
             stateLock.withLock {
                 isStarting = false
             }
-            log(.listener, level: .error, title: "Missing Public URL", message: "Public URL mode requires a valid external HTTP or HTTPS URL.")
+            log(.listener, level: .error, title: "Missing Custom Public URL", message: "Custom Public URL mode requires a valid external HTTP or HTTPS URL.")
             return
+        case .publicManaged where AppSettings.shared.normalizedManagedRelayBaseURL == nil:
+            stateLock.withLock {
+                isStarting = false
+            }
+            log(.listener, level: .error, title: "Missing Relay Service URL", message: "Managed Public URL mode requires a valid relay service URL.")
+            return
+        default:
+            break
         }
 
         log(
@@ -243,6 +654,7 @@ final class ServerManager {
         }
 
         state.2?.resume()
+        await ManagedRelayService.shared.stop(reason: "Server stopped.")
         log(.listener, title: "Server Stopped", message: "The API listener was stopped.")
     }
 
@@ -267,6 +679,9 @@ final class ServerManager {
                 isRunning = true
                 isStarting = false
             }
+            Task { @MainActor in
+                await ManagedRelayService.shared.startIfNeeded()
+            }
             log(
                 .listener,
                 title: "Listener Ready",
@@ -283,12 +698,18 @@ final class ServerManager {
                 isStarting = false
                 listener = nil
             }
+            Task { @MainActor in
+                await ManagedRelayService.shared.stop(reason: "Listener failed.")
+            }
             log(.listener, level: .error, title: "Listener Failed", message: error.localizedDescription)
         case .cancelled:
             stateLock.withLock {
                 isRunning = false
                 isStarting = false
                 listener = nil
+            }
+            Task { @MainActor in
+                await ManagedRelayService.shared.stop(reason: "Listener cancelled.")
             }
             log(.listener, title: "Listener Cancelled", message: "The server listener was cancelled.")
         default:
@@ -322,7 +743,7 @@ final class ServerManager {
             sendErrorResponse(
                 status: 403,
                 message: AppSettings.shared.serverExposureMode == .localOnly
-                    ? "This server is in Local Only mode. Switch to Local Network or Public URL mode to accept non-local requests."
+                    ? "This server is in Local Only mode. Switch to Local Network, Managed Public URL, or Custom Public URL mode to accept non-local requests."
                     : "This connection is not allowed for the current server exposure mode.",
                 on: connection
             )
@@ -346,7 +767,7 @@ final class ServerManager {
         switch AppSettings.shared.serverExposureMode {
         case .localOnly:
             break
-        case .localNetwork, .publicURL:
+        case .localNetwork, .publicManaged, .publicCustom:
             return true
         }
 
@@ -573,7 +994,8 @@ final class ServerManager {
                         "/api/agent/approvals/reject"
                     ],
                     "canonical_url": AppSettings.shared.serverURL,
-                    "exposure_mode": AppSettings.shared.serverExposureMode.rawValue
+                    "exposure_mode": AppSettings.shared.serverExposureMode.rawValue,
+                    "build_variant": AppSettings.shared.buildVariant.rawValue
                 ],
                 on: connection,
                 context: context
@@ -605,7 +1027,8 @@ final class ServerManager {
                     "tools": tools,
                     "active_workspace_id": AgentWorkspaceManager.shared.activeWorkspaceID,
                     "active_model_id": activeModel?.catalogId ?? "",
-                    "active_model_name": activeModel?.displayName ?? ""
+                    "active_model_name": activeModel?.displayName ?? "",
+                    "build_variant": AppSettings.shared.buildVariant.rawValue
                 ],
                 on: connection,
                 context: context
@@ -618,6 +1041,7 @@ final class ServerManager {
         sendJSONResponse(
             status: 200,
             body: [
+                "build_variant": AppSettings.shared.buildVariant.rawValue,
                 "active_workspace_id": AgentWorkspaceManager.shared.activeWorkspaceID,
                 "workspaces": AgentWorkspaceManager.shared.workspaces.map(agentWorkspacePayload)
             ],

@@ -10,7 +10,8 @@ import FoundationModels
 enum ServerExposureMode: String, CaseIterable, Identifiable {
     case localOnly
     case localNetwork
-    case publicURL
+    case publicManaged
+    case publicCustom
 
     var id: String { rawValue }
 
@@ -20,8 +21,10 @@ enum ServerExposureMode: String, CaseIterable, Identifiable {
             return "Local Only"
         case .localNetwork:
             return "Local Network"
-        case .publicURL:
-            return "Public URL"
+        case .publicManaged:
+            return "Managed Public URL"
+        case .publicCustom:
+            return "Custom Public URL"
         }
     }
 
@@ -31,13 +34,28 @@ enum ServerExposureMode: String, CaseIterable, Identifiable {
             return "Only loopback clients on this device can connect."
         case .localNetwork:
             return "Other devices that can reach this device on the network can connect."
-        case .publicURL:
-            return "Use a user-managed tunnel or reverse proxy URL as the worldwide endpoint."
+        case .publicManaged:
+            return "OllamaKit connects to its managed relay service and maintains the public endpoint for you."
+        case .publicCustom:
+            return "Use your own tunnel or reverse proxy URL as the worldwide endpoint."
         }
     }
 
     var allowsRemoteConnections: Bool {
         self != .localOnly
+    }
+
+    var isPublic: Bool {
+        switch self {
+        case .publicManaged, .publicCustom:
+            return true
+        case .localOnly, .localNetwork:
+            return false
+        }
+    }
+
+    var usesManagedRelay: Bool {
+        self == .publicManaged
     }
 }
 
@@ -61,6 +79,7 @@ enum ServerLogCategory: String, CaseIterable, Identifiable, Sendable {
     case stream
     case response
     case health
+    case relay
     case error
 
     var id: String { rawValue }
@@ -841,9 +860,21 @@ final class AppSettings: ObservableObject {
         }
     }
     @Published var publicBaseURL: String { didSet { save(publicBaseURL, for: Keys.publicBaseURL) } }
+    @Published var managedRelayBaseURL: String {
+        didSet {
+            if oldValue.trimmedForLookup != managedRelayBaseURL.trimmedForLookup {
+                clearManagedRelaySession()
+            }
+            save(managedRelayBaseURL, for: Keys.managedRelayBaseURL)
+        }
+    }
+    @Published var managedRelayDeviceID: String { didSet { save(managedRelayDeviceID, for: Keys.managedRelayDeviceID) } }
+    @Published var managedRelayAccessToken: String { didSet { save(managedRelayAccessToken, for: Keys.managedRelayAccessToken) } }
+    @Published var managedRelayAssignedURL: String { didSet { save(managedRelayAssignedURL, for: Keys.managedRelayAssignedURL) } }
+    @Published var managedRelayWebSocketURL: String { didSet { save(managedRelayWebSocketURL, for: Keys.managedRelayWebSocketURL) } }
     @Published var requireApiKey: Bool {
         didSet {
-            if serverExposureMode == .publicURL && !requireApiKey {
+            if serverExposureMode.isPublic && !requireApiKey {
                 requireApiKey = true
                 return
             }
@@ -852,7 +883,7 @@ final class AppSettings: ObservableObject {
     }
     @Published var apiKey: String {
         didSet {
-            if serverExposureMode == .publicURL && apiKey.trimmedForLookup.isEmpty {
+            if serverExposureMode.isPublic && apiKey.trimmedForLookup.isEmpty {
                 apiKey = Self.generatedAPIKey()
                 return
             }
@@ -920,14 +951,31 @@ final class AppSettings: ObservableObject {
 
         serverEnabled = defaults.object(forKey: Keys.serverEnabled) as? Bool ?? false
         serverPort = defaults.object(forKey: Keys.serverPort) as? Int ?? 11434
-        if let rawMode = defaults.string(forKey: Keys.serverExposureMode),
-           let persistedMode = ServerExposureMode(rawValue: rawMode) {
-            serverExposureMode = persistedMode
+        if let rawMode = defaults.string(forKey: Keys.serverExposureMode) {
+            switch rawMode {
+            case ServerExposureMode.localOnly.rawValue:
+                serverExposureMode = .localOnly
+            case ServerExposureMode.localNetwork.rawValue:
+                serverExposureMode = .localNetwork
+            case ServerExposureMode.publicManaged.rawValue:
+                serverExposureMode = .publicManaged
+            case ServerExposureMode.publicCustom.rawValue, "publicURL":
+                serverExposureMode = .publicCustom
+            default:
+                serverExposureMode = .localOnly
+            }
         } else {
             let legacyAllowExternal = defaults.object(forKey: Keys.allowExternalConnections) as? Bool ?? false
             serverExposureMode = legacyAllowExternal ? .localNetwork : .localOnly
         }
         publicBaseURL = defaults.string(forKey: Keys.publicBaseURL) ?? ""
+        managedRelayBaseURL = defaults.string(forKey: Keys.managedRelayBaseURL)
+            ?? (Bundle.main.object(forInfoDictionaryKey: "OllamaKitManagedRelayBaseURL") as? String)
+            ?? ""
+        managedRelayDeviceID = defaults.string(forKey: Keys.managedRelayDeviceID) ?? UUID().uuidString.lowercased()
+        managedRelayAccessToken = defaults.string(forKey: Keys.managedRelayAccessToken) ?? ""
+        managedRelayAssignedURL = defaults.string(forKey: Keys.managedRelayAssignedURL) ?? ""
+        managedRelayWebSocketURL = defaults.string(forKey: Keys.managedRelayWebSocketURL) ?? ""
         requireApiKey = defaults.object(forKey: Keys.requireApiKey) as? Bool ?? false
         apiKey = defaults.string(forKey: Keys.apiKey) ?? Self.generatedAPIKey()
         defaultModelId = defaults.string(forKey: Keys.defaultModelId) ?? ""
@@ -957,6 +1005,14 @@ final class AppSettings: ObservableObject {
         "http://127.0.0.1:\(serverPort)"
     }
 
+    var buildVariant: AppBuildVariant {
+        AppBuildVariant.current
+    }
+
+    var isJailbreakBuild: Bool {
+        buildVariant == .jailbreak
+    }
+
     var allowExternalConnections: Bool {
         serverExposureMode.allowsRemoteConnections
     }
@@ -965,17 +1021,30 @@ final class AppSettings: ObservableObject {
         Self.sanitizedPublicBaseURL(from: publicBaseURL)
     }
 
+    var normalizedManagedRelayBaseURL: String? {
+        Self.sanitizedPublicBaseURL(from: managedRelayBaseURL)
+    }
+
     var publicServerURL: String {
-        normalizedPublicBaseURL ?? publicBaseURL.trimmedForLookup
+        switch serverExposureMode {
+        case .publicManaged:
+            return managedRelayAssignedURL.trimmedForLookup
+        case .publicCustom:
+            return normalizedPublicBaseURL ?? publicBaseURL.trimmedForLookup
+        case .localOnly, .localNetwork:
+            return ""
+        }
     }
 
     var isAPIKeyRequiredForCurrentExposure: Bool {
-        serverExposureMode == .publicURL || requireApiKey
+        serverExposureMode.isPublic || requireApiKey
     }
 
     var serverURL: String {
         switch serverExposureMode {
-        case .publicURL:
+        case .publicManaged:
+            return managedRelayAssignedURL.trimmedForLookup.nonEmpty ?? localServerURL
+        case .publicCustom:
             return normalizedPublicBaseURL ?? localServerURL
         case .localOnly, .localNetwork:
             return localServerURL
@@ -1037,6 +1106,11 @@ final class AppSettings: ObservableObject {
         serverPort = 11434
         serverExposureMode = .localOnly
         publicBaseURL = ""
+        managedRelayBaseURL = ""
+        managedRelayDeviceID = UUID().uuidString.lowercased()
+        managedRelayAccessToken = ""
+        managedRelayAssignedURL = ""
+        managedRelayWebSocketURL = ""
         requireApiKey = false
         apiKey = Self.generatedAPIKey()
         defaultModelId = ""
@@ -1075,9 +1149,9 @@ final class AppSettings: ObservableObject {
     }
 
     private func enforcePublicServerSecurity() {
-        guard serverExposureMode == .publicURL else { return }
+        guard serverExposureMode.isPublic else { return }
 
-        if publicBaseURL.trimmedForLookup.isEmpty {
+        if serverExposureMode == .publicCustom && publicBaseURL.trimmedForLookup.isEmpty {
             save("", for: Keys.publicBaseURL)
         }
 
@@ -1088,6 +1162,12 @@ final class AppSettings: ObservableObject {
         if apiKey.trimmedForLookup.isEmpty {
             apiKey = Self.generatedAPIKey()
         }
+    }
+
+    func clearManagedRelaySession() {
+        managedRelayAccessToken = ""
+        managedRelayAssignedURL = ""
+        managedRelayWebSocketURL = ""
     }
 
     private static func generatedAPIKey() -> String {
@@ -1144,6 +1224,11 @@ final class AppSettings: ObservableObject {
         static let allowExternalConnections = "allowExternalConnections"
         static let serverExposureMode = "serverExposureMode"
         static let publicBaseURL = "publicBaseURL"
+        static let managedRelayBaseURL = "managedRelayBaseURL"
+        static let managedRelayDeviceID = "managedRelayDeviceID"
+        static let managedRelayAccessToken = "managedRelayAccessToken"
+        static let managedRelayAssignedURL = "managedRelayAssignedURL"
+        static let managedRelayWebSocketURL = "managedRelayWebSocketURL"
         static let requireApiKey = "requireApiKey"
         static let apiKey = "apiKey"
         static let defaultModelId = "defaultModelId"
