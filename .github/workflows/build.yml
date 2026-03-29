@@ -162,8 +162,6 @@ jobs:
         build_variant() {
           local variant="$1"
           local swift_flag="$2"
-          local bundle_id="$3"
-          local product_name="$4"
           local archive_dir="build/${variant}"
           local archive_path="${archive_dir}/OllamaKit.xcarchive"
           local build_log="build/logs/${variant}.log"
@@ -190,8 +188,6 @@ jobs:
             ARCHS="arm64" \
             OLLAMAKIT_BUILD_VARIANT="$variant" \
             OTHER_SWIFT_FLAGS="\$(inherited) ${swift_flag}" \
-            PRODUCT_BUNDLE_IDENTIFIER="$bundle_id" \
-            PRODUCT_NAME="$product_name" \
             2>&1 | tee "$build_log"
 
           APP_PATH=$(find "$archive_path" -name "*.app" -type d 2>/dev/null | head -1)
@@ -224,8 +220,8 @@ jobs:
           fi
         }
 
-        build_variant "stockSideload" "-D OLLAMAKIT_VARIANT_STOCK_SIDELOAD" "com.ollamakit.app" "OllamaKit"
-        build_variant "jailbreak" "-D OLLAMAKIT_VARIANT_JAILBREAK" "com.ollamakit.app.jailbreak" "OllamaKitJailbreak"
+        build_variant "stockSideload" "-D OLLAMAKIT_VARIANT_STOCK_SIDELOAD"
+        build_variant "jailbreak" "-D OLLAMAKIT_VARIANT_JAILBREAK"
 
     - name: Upload Build Logs
       if: always()
