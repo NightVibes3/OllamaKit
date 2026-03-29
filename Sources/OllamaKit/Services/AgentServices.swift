@@ -348,7 +348,7 @@ struct AgentToolDescriptor: Identifiable, Hashable, Codable, Sendable {
     let availabilityReason: String?
     let timeoutSeconds: Int
     let quotaDescription: String
-    let requiredCapabilities: [AgentToolCapabilityKey] = []
+    var requiredCapabilities: [AgentToolCapabilityKey] = []
 }
 
 struct AgentWorkspaceRecord: Identifiable, Hashable, Codable, Sendable {
@@ -1099,7 +1099,7 @@ final class BrowserSessionManager: NSObject, ObservableObject {
         let webView = webView(for: sessionID)
         let title = (try? await webView.agentEvaluateString("document.title")) ?? sessions[index].title
         let summary = (try? await webView.agentEvaluateString("(document.body?.innerText || '').slice(0, 400)")) ?? sessions[index].pageSummary ?? ""
-        sessions[index].title = title?.nonEmpty ?? sessions[index].title
+        sessions[index].title = title.nonEmpty ?? sessions[index].title
         sessions[index].currentURL = webView.url?.absoluteString ?? sessions[index].currentURL
         sessions[index].lastLoadedAt = .now
         sessions[index].canGoBack = webView.canGoBack
@@ -1477,8 +1477,8 @@ final class AgentWorkspaceManager: ObservableObject {
         let currentFiles = try fileFingerprintMap(rootURL: workspaceURL)
         let baselineFiles = try fileFingerprintMap(rootURL: baselineURL)
 
-        let added = currentFiles.keys.subtracting(baselineFiles.keys).sorted()
-        let removed = baselineFiles.keys.subtracting(currentFiles.keys).sorted()
+        let added = Set(currentFiles.keys).subtracting(Set(baselineFiles.keys)).sorted()
+        let removed = Set(baselineFiles.keys).subtracting(Set(currentFiles.keys)).sorted()
         let modified = Set(currentFiles.keys)
             .intersection(Set(baselineFiles.keys))
             .filter { currentFiles[$0] != baselineFiles[$0] }

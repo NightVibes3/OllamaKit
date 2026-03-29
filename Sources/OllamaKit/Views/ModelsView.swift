@@ -1423,7 +1423,7 @@ class ModelsViewModel: ObservableObject {
 
 @MainActor
 class ModelSearchViewModel: ObservableObject {
-    @Published private(set) var deviceProfile = DeviceCapabilityProfile.placeholder
+    @Published var deviceProfile = DeviceCapabilityProfile.placeholder
     @Published var results: [HuggingFaceModel] = []
     @Published var isSearching = false
     @Published var selectedModel: HuggingFaceModel?
@@ -1896,8 +1896,12 @@ struct DeviceCapabilityProfile {
             hasMetalDevice: true,
             metalDeviceName: nil
         ),
-        appleFoundationTitle: "Checking",
-        appleFoundationMessage: "Checking Apple Intelligence availability on this device."
+        appleAvailability: CompatibilityReport(
+            backendKind: .appleFoundation,
+            level: .unknown,
+            title: "Checking",
+            message: "Checking Apple Intelligence availability on this device."
+        )
     )
 
     var deviceLabel: String {

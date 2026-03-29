@@ -395,7 +395,11 @@ struct AgentView: View {
                                 .padding(.vertical, 8)
                                 .background(
                                     RoundedRectangle(cornerRadius: 10)
-                                        .fill(session.id == activeBrowserSession?.id ? Color.accentColor.opacity(0.2) : .ultraThinMaterial)
+                                        .fill(
+                                            session.id == activeBrowserSession?.id
+                                                ? AnyShapeStyle(Color.accentColor.opacity(0.2))
+                                                : AnyShapeStyle(.ultraThinMaterial)
+                                        )
                                 )
                         }
                     }

@@ -1037,43 +1037,49 @@ final class ServerManager {
     }
 
     private func handleAgentWorkspaces(on connection: NWConnection, context: ServerRequestContext) {
-        AgentWorkspaceManager.shared.bootstrapIfNeeded()
-        sendJSONResponse(
-            status: 200,
-            body: [
-                "build_variant": AppSettings.shared.buildVariant.rawValue,
-                "active_workspace_id": AgentWorkspaceManager.shared.activeWorkspaceID,
-                "workspaces": AgentWorkspaceManager.shared.workspaces.map(agentWorkspacePayload)
-            ],
-            on: connection,
-            context: context
-        )
+        Task { @MainActor in
+            AgentWorkspaceManager.shared.bootstrapIfNeeded()
+            sendJSONResponse(
+                status: 200,
+                body: [
+                    "build_variant": AppSettings.shared.buildVariant.rawValue,
+                    "active_workspace_id": AgentWorkspaceManager.shared.activeWorkspaceID,
+                    "workspaces": AgentWorkspaceManager.shared.workspaces.map(agentWorkspacePayload)
+                ],
+                on: connection,
+                context: context
+            )
+        }
     }
 
     private func handleAgentCheckpoints(on connection: NWConnection, context: ServerRequestContext) {
-        let checkpoints = AgentWorkspaceManager.shared
-            .checkpointRecords()
-            .map(agentCheckpointPayload)
-        sendJSONResponse(
-            status: 200,
-            body: [
-                "active_workspace_id": AgentWorkspaceManager.shared.activeWorkspaceID,
-                "checkpoints": checkpoints
-            ],
-            on: connection,
-            context: context
-        )
+        Task { @MainActor in
+            let checkpoints = AgentWorkspaceManager.shared
+                .checkpointRecords()
+                .map(agentCheckpointPayload)
+            sendJSONResponse(
+                status: 200,
+                body: [
+                    "active_workspace_id": AgentWorkspaceManager.shared.activeWorkspaceID,
+                    "checkpoints": checkpoints
+                ],
+                on: connection,
+                context: context
+            )
+        }
     }
 
     private func handleAgentApprovals(on connection: NWConnection, context: ServerRequestContext) {
-        sendJSONResponse(
-            status: 200,
-            body: [
-                "pending": AgentApprovalCenter.shared.requests.map(agentApprovalPayload)
-            ],
-            on: connection,
-            context: context
-        )
+        Task { @MainActor in
+            sendJSONResponse(
+                status: 200,
+                body: [
+                    "pending": AgentApprovalCenter.shared.requests.map(agentApprovalPayload)
+                ],
+                on: connection,
+                context: context
+            )
+        }
     }
 
     private func handleAgentExecute(request: String, on connection: NWConnection, context: ServerRequestContext) {
@@ -1125,8 +1131,10 @@ final class ServerManager {
             return
         }
 
-        let result = AgentToolRuntime.shared.reject(requestID: requestID)
-        sendAgentExecutionResponse(result, on: connection, context: context)
+        Task { @MainActor in
+            let result = AgentToolRuntime.shared.reject(requestID: requestID)
+            sendAgentExecutionResponse(result, on: connection, context: context)
+        }
     }
 
     private func handleLegacyListModels(on connection: NWConnection, context: ServerRequestContext) {

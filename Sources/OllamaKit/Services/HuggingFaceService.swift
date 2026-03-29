@@ -1,4 +1,5 @@
 import Foundation
+import OllamaCore
 
 final class HuggingFaceService: @unchecked Sendable {
     static let shared = HuggingFaceService()
