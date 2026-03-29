@@ -996,7 +996,11 @@ final class AppSettings: ObservableObject {
         agentBrowserHomeURL = defaults.string(forKey: Keys.agentBrowserHomeURL) ?? "https://github.com"
         agentBrowserLastURL = defaults.string(forKey: Keys.agentBrowserLastURL) ?? ""
         agentBundleExpertMode = defaults.object(forKey: Keys.agentBundleExpertMode) as? Bool ?? false
-        agentModelCapabilityOverrides = loadCodable([String: ModelAgentCapabilityOverride].self, for: Keys.agentModelCapabilityOverrides) ?? [:]
+        agentModelCapabilityOverrides = Self.loadCodable(
+            [String: ModelAgentCapabilityOverride].self,
+            for: Keys.agentModelCapabilityOverrides,
+            defaults: defaults
+        ) ?? [:]
 
         enforcePublicServerSecurity()
     }
@@ -1140,7 +1144,7 @@ final class AppSettings: ObservableObject {
         }
     }
 
-    private func loadCodable<T: Decodable>(_ type: T.Type, for key: String) -> T? {
+    private static func loadCodable<T: Decodable>(_ type: T.Type, for key: String, defaults: UserDefaults) -> T? {
         guard let data = defaults.data(forKey: key) else {
             return nil
         }
