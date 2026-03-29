@@ -138,94 +138,101 @@ jobs:
         echo "=== Built llama.xcframework ==="
         find Vendor/llama.xcframework -type f | sort | head -100
 
-    - name: Build Archive
+    - name: Verify Agent Workspace Seed
+      run: |
+        set -eo pipefail
+        python3 Scripts/generate-agent-workspace-seed.py --check
+
+    - name: Run Relay Tests
+      run: |
+        set -eo pipefail
+        npm --prefix Relay test
+
+    - name: Run Package Tests
+      run: |
+        set -eo pipefail
+        swift test
+
+    - name: Build Variant Archives
       run: |
         set -eo pipefail
         rm -rf build
-        mkdir -p build
+        mkdir -p build/logs build/ipas
 
-        xcodebuild archive \
-          -project OllamaKit.xcodeproj \
-          -scheme OllamaKit \
-          -configuration ${{ env.CONFIGURATION }} \
-          -sdk iphoneos \
-          -archivePath "build/OllamaKit.xcarchive" \
-          CODE_SIGN_IDENTITY="" \
-          CODE_SIGNING_REQUIRED=NO \
-          CODE_SIGNING_ALLOWED=NO \
-          ENABLE_BITCODE=NO \
-          SKIP_INSTALL=NO \
-          COMPILER_INDEX_STORE_ENABLE=NO \
-          IPHONEOS_DEPLOYMENT_TARGET=${{ env.IOS_DEPLOYMENT_TARGET }} \
-          VALIDATE_PRODUCT=NO \
-          ONLY_ACTIVE_ARCH=NO \
-          ARCHS="arm64" \
-          2>&1 | tee build/build.log
-        
-        echo "=== Build completed, checking results ==="
-        ls -la build/
-        
-        if [ -d "build/OllamaKit.xcarchive" ]; then
-          echo "=== Archive exists ==="
-          ls -la build/OllamaKit.xcarchive/
-          echo "=== Products ==="
-          ls -la build/OllamaKit.xcarchive/Products/ 2>/dev/null || echo "No Products"
-          echo "=== Applications ==="
-          ls -la build/OllamaKit.xcarchive/Products/Applications/ 2>/dev/null || echo "No Applications"
-          echo "=== Find all .app files ==="
-          find build/OllamaKit.xcarchive -name "*.app" -type d 2>/dev/null
-        else
-          echo "=== No archive found, checking for other outputs ==="
-          find build -type f 2>/dev/null | head -30
-        fi
+        build_variant() {
+          local variant="$1"
+          local swift_flag="$2"
+          local bundle_id="$3"
+          local product_name="$4"
+          local archive_dir="build/${variant}"
+          local archive_path="${archive_dir}/OllamaKit.xcarchive"
+          local build_log="build/logs/${variant}.log"
+          local ipa_path="build/ipas/OllamaKit-${variant}-unsigned.ipa"
 
-    - name: Create IPA (Unsigned)
-      run: |
-        echo "=== Creating IPA ==="
-        
-        # Find the .app file
-        APP_PATH=$(find build/OllamaKit.xcarchive -name "*.app" -type d 2>/dev/null | head -1)
-        
-        if [ -z "$APP_PATH" ]; then
-          echo "ERROR: Could not find .app file"
-          echo "=== Full build directory ==="
-          find build -type f 2>/dev/null | head -50
-          exit 1
-        fi
+          rm -rf "$archive_dir" build/Payload
+          mkdir -p "$archive_dir" build/Payload
 
-        echo "Found app at: $APP_PATH"
-        ls -la "$APP_PATH"
+          xcodebuild archive \
+            -project OllamaKit.xcodeproj \
+            -scheme OllamaKit \
+            -configuration ${{ env.CONFIGURATION }} \
+            -sdk iphoneos \
+            -archivePath "$archive_path" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ENABLE_BITCODE=NO \
+            SKIP_INSTALL=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            IPHONEOS_DEPLOYMENT_TARGET=${{ env.IOS_DEPLOYMENT_TARGET }} \
+            VALIDATE_PRODUCT=NO \
+            ONLY_ACTIVE_ARCH=NO \
+            ARCHS="arm64" \
+            OLLAMAKIT_BUILD_VARIANT="$variant" \
+            OTHER_SWIFT_FLAGS="\$(inherited) ${swift_flag}" \
+            PRODUCT_BUNDLE_IDENTIFIER="$bundle_id" \
+            PRODUCT_NAME="$product_name" \
+            2>&1 | tee "$build_log"
 
-        mkdir -p build/Payload
-        cp -R "$APP_PATH" build/Payload/
+          APP_PATH=$(find "$archive_path" -name "*.app" -type d 2>/dev/null | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: Could not find .app file for variant ${variant}"
+            find "$archive_dir" -type f 2>/dev/null | head -50
+            exit 1
+          fi
 
-        APP_NAME=$(basename "$APP_PATH")
-        echo "App name: $APP_NAME"
+          cp -R "$APP_PATH" build/Payload/
+          APP_NAME=$(basename "$APP_PATH")
+          rm -rf "build/Payload/$APP_NAME/_CodeSignature" 2>/dev/null || true
+          rm -rf "build/Payload/$APP_NAME/CodeResources" 2>/dev/null || true
 
-        rm -rf "build/Payload/$APP_NAME/_CodeSignature" 2>/dev/null || true
-        rm -rf "build/Payload/$APP_NAME/CodeResources" 2>/dev/null || true
+          (
+            cd build
+            zip -qr "$(basename "$ipa_path")" Payload
+          )
+          mv "build/$(basename "$ipa_path")" "$ipa_path"
+          rm -rf build/Payload
 
-        cd build
-        zip -r "OllamaKit-unsigned.ipa" Payload
-        cd ..
+          IPA_SIZE=$(stat -f%z "$ipa_path" 2>/dev/null || stat -c%s "$ipa_path" 2>/dev/null || echo "0")
+          echo "=== ${variant} IPA created ==="
+          ls -la "$ipa_path"
+          echo "IPA size: $IPA_SIZE bytes"
 
-        echo "=== IPA created ==="
-        ls -la build/OllamaKit-unsigned.ipa
+          if [ "$IPA_SIZE" -lt 1000 ]; then
+            echo "ERROR: IPA file for ${variant} is too small"
+            exit 1
+          fi
+        }
 
-        IPA_SIZE=$(stat -f%z build/OllamaKit-unsigned.ipa 2>/dev/null || stat -c%s build/OllamaKit-unsigned.ipa 2>/dev/null || echo "0")
-        echo "IPA size: $IPA_SIZE bytes"
-
-        if [ "$IPA_SIZE" -lt 1000 ]; then
-          echo "ERROR: IPA file is too small"
-          exit 1
-        fi
+        build_variant "stockSideload" "-D OLLAMAKIT_VARIANT_STOCK_SIDELOAD" "com.ollamakit.app" "OllamaKit"
+        build_variant "jailbreak" "-D OLLAMAKIT_VARIANT_JAILBREAK" "com.ollamakit.app.jailbreak" "OllamaKitJailbreak"
 
     - name: Upload Build Logs
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: build-logs-${{ env.CONFIGURATION }}
-        path: build/build.log
+        path: build/logs
         retention-days: 7
         if-no-files-found: ignore
 
@@ -233,20 +240,22 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: OllamaKit-unsigned-${{ env.CONFIGURATION }}
-        path: build/OllamaKit-unsigned.ipa
+        path: build/ipas
         retention-days: 30
 
     - name: Upload to Release
       if: github.event_name == 'push' && github.ref == 'refs/heads/main'
       uses: softprops/action-gh-release@v1
       with:
-        files: build/OllamaKit-unsigned.ipa
+        files: |
+          build/ipas/OllamaKit-stockSideload-unsigned.ipa
+          build/ipas/OllamaKit-jailbreak-unsigned.ipa
         tag_name: v${{ github.run_number }}
         name: OllamaKit Build ${{ github.run_number }}
         body: |
-          ## OllamaKit Unsigned IPA
+          ## OllamaKit Unsigned IPAs
 
-          This is an unsigned IPA built from commit ${{ github.sha }}.
+          These are unsigned IPAs built from commit ${{ github.sha }}.
 
           ### Installation
 
@@ -283,6 +292,7 @@ jobs:
           - Browse and download GGUF models from Hugging Face
           - Local chat UI with Markdown rendering
           - Ollama-style API routes plus OpenAI-compatible `/v1` model/chat/completion routes
+          - Two release variants: stock sideload and jailbreak
           - Best-effort background server wakeups
           - Unsigned real-device IPA for sideload signing
 

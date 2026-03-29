@@ -33,6 +33,13 @@ struct AgentView: View {
         workspaceManager.currentPreviewURL()
     }
 
+    private var showsBundleSection: Bool {
+        settings.isJailbreakBuild && (
+            !bundlePatches.records.isEmpty ||
+            workspaceManager.workspaces.contains(where: { $0.kind == .bundleLive })
+        )
+    }
+
     private var filteredLogs: [AgentLogEntry] {
         let needle = logSearch.trimmedForLookup.lowercased()
         guard !needle.isEmpty else { return displayedLogs }
@@ -87,7 +94,7 @@ struct AgentView: View {
                         previewSection
                     }
 
-                    if !bundlePatches.records.isEmpty || workspaceManager.workspaces.contains(where: { $0.kind == .bundleLive }) {
+                    if showsBundleSection {
                         SurfaceSectionCard(title: "Bundle Patches") {
                             bundleSection
                         }
@@ -151,6 +158,7 @@ struct AgentView: View {
 
             if let context = runtimeContext?.objectValue {
                 contextRow(title: "App", value: context["app"]?.compactDescription ?? "Unknown")
+                contextRow(title: "Build Variant", value: context["app"]?.objectValue?["build_variant"]?.stringValue ?? "Unknown")
                 contextRow(title: "Device", value: context["device"]?.compactDescription ?? "Unknown")
                 contextRow(title: "Server", value: context["server"]?.compactDescription ?? "Unknown")
                 contextRow(title: "Agent", value: context["agent"]?.compactDescription ?? "Unknown")

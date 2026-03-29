@@ -1,5 +1,6 @@
 import Combine
 import CryptoKit
+import Darwin
 import Foundation
 import OllamaCore
 import UIKit
@@ -52,11 +53,13 @@ enum AgentToolCategory: String, CaseIterable, Identifiable, Codable, Sendable {
     case javascript
     case python
     case node
+    case swift
     case git
     case github
     case githubActions
     case internet
     case webPreview
+    case relay
     case remote
 
     var id: String { rawValue }
@@ -126,6 +129,7 @@ enum AgentLogCategory: String, CaseIterable, Identifiable, Codable, Sendable {
     case shell
     case javascript
     case runtime
+    case relay
     case preview
     case server
     case tool
@@ -429,7 +433,9 @@ struct AgentCapabilityProfile: Hashable, Codable, Sendable {
     let supportsJavaScriptRuntime: Bool
     let supportsPythonRuntime: Bool
     let supportsNodeRuntime: Bool
+    let supportsSwiftRuntime: Bool
     let supportsGitHubActions: Bool
+    let supportsManagedRelay: Bool
     let supportsLiveBundleEditing: Bool
     let supportsExpertBundleEditing: Bool
 }
@@ -1201,11 +1207,52 @@ final class AgentWorkspaceManager: ObservableObject {
     static let downloadedSiteWorkspaceID = "downloaded-sites"
     static let liveBundleWorkspaceID = "live-bundle"
     static let mirroredPrefixes = [
+        ".github/workflows/",
+        "LiveContainerFix/",
+        "Scripts/",
         "Sources/OllamaCore/",
         "Sources/OllamaKit/",
+        "Tests/",
+        "Vendor/anemll-swift-cli/",
         "OllamaKit.xcodeproj/",
         "README.md",
-        "Package.swift"
+        "Package.swift",
+        "LICENSE"
+    ]
+    static let mirroredExactFiles: Set<String> = [
+        "LICENSE",
+        "Package.swift",
+        "README.md",
+        "OllamaKit.xcodeproj/project.pbxproj"
+    ]
+    static let mirroredTextExtensions: Set<String> = [
+        "c",
+        "cc",
+        "cfg",
+        "cpp",
+        "entitlements",
+        "h",
+        "htm",
+        "html",
+        "java",
+        "js",
+        "json",
+        "m",
+        "md",
+        "pbxproj",
+        "plist",
+        "prompt",
+        "py",
+        "rb",
+        "sh",
+        "strings",
+        "swift",
+        "txt",
+        "xcconfig",
+        "xcscheme",
+        "xml",
+        "yaml",
+        "yml"
     ]
 
     @Published private(set) var workspaces: [AgentWorkspaceRecord] = []
@@ -1215,6 +1262,28 @@ final class AgentWorkspaceManager: ObservableObject {
     private var hasBootstrapped = false
 
     private init() {}
+
+    static func shouldMirrorPath(_ rawPath: String) -> Bool {
+        let path = rawPath.replacingOccurrences(of: "\\", with: "/").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else { return false }
+
+        if mirroredExactFiles.contains(path) {
+            return true
+        }
+
+        guard mirroredPrefixes.contains(where: { prefix in
+            path == prefix || path.hasPrefix(prefix)
+        }) else {
+            return false
+        }
+
+        let fileExtension = URL(fileURLWithPath: path).pathExtension.lowercased()
+        if fileExtension.isEmpty {
+            return mirroredExactFiles.contains(path)
+        }
+
+        return mirroredTextExtensions.contains(fileExtension)
+    }
 
     var activeWorkspaceID: String {
         if let configured = AppSettings.shared.agentDefaultWorkspaceID.nonEmpty,
@@ -1410,8 +1479,8 @@ final class AgentWorkspaceManager: ObservableObject {
 
         let added = currentFiles.keys.subtracting(baselineFiles.keys).sorted()
         let removed = baselineFiles.keys.subtracting(currentFiles.keys).sorted()
-        let modified = currentFiles.keys
-            .intersection(baselineFiles.keys)
+        let modified = Set(currentFiles.keys)
+            .intersection(Set(baselineFiles.keys))
             .filter { currentFiles[$0] != baselineFiles[$0] }
             .sorted()
 
@@ -1823,6 +1892,13 @@ final class AgentWorkspaceManager: ObservableObject {
     }
 
     private func ensureBundleLiveWorkspaceIfAvailable() throws {
+        guard AppSettings.shared.buildVariant.allowsLiveBundleWorkspace else {
+            workspaces.removeAll { $0.id == Self.liveBundleWorkspaceID }
+            checkpointsByWorkspace.removeValue(forKey: Self.liveBundleWorkspaceID)
+            persistState()
+            return
+        }
+
         let bundleURL = Bundle.main.bundleURL.standardizedFileURL
         let isWritable = fileManager.isWritableFile(atPath: bundleURL.path)
         if isWritable {
@@ -2278,7 +2354,7 @@ final class GitHubService {
 
     func getFile(repository: String, path: String, ref: String?) async throws -> AgentJSONValue {
         let repo = try parseRepository(repository)
-        let reference = ref?.nonEmpty ?? try await defaultBranch(repository: repository)
+        let reference = try await resolvedReference(ref, repository: repository)
         let content = try await fetchTextFile(repository: repo, path: path, ref: reference)
         return .object([
             "repository": .string(repo.fullName),
@@ -2344,7 +2420,7 @@ final class GitHubService {
 
     func createBranch(repository: String, branch: String, baseBranch: String?) async throws -> AgentJSONValue {
         let repo = try parseRepository(repository)
-        let resolvedBase = baseBranch?.nonEmpty ?? try await defaultBranch(repository: repository)
+        let resolvedBase = try await resolvedReference(baseBranch, repository: repository)
         let baseRef = try await branchReference(repository: repo, branch: resolvedBase)
         let baseSHA = baseRef["object"]?.objectValue?["sha"]?.stringValue ?? ""
         _ = try await ensureBranch(repository: repo, branch: branch, fallbackSHA: baseSHA)
@@ -2359,7 +2435,7 @@ final class GitHubService {
 
     func createPullRequest(repository: String, title: String, body: String, head: String, base: String?) async throws -> AgentJSONValue {
         let repo = try parseRepository(repository)
-        let resolvedBase = base?.nonEmpty ?? try await defaultBranch(repository: repository)
+        let resolvedBase = try await resolvedReference(base, repository: repository)
         let response = try await requestJSON(
             components: ["repos", repo.owner, repo.name, "pulls"],
             queryItems: [],
@@ -2477,7 +2553,7 @@ final class GitHubService {
 
     func fetchWorkspaceFiles(repository: String, ref: String?) async throws -> WorkspaceRefresh {
         let repo = try parseRepository(repository)
-        let reference = ref?.nonEmpty ?? try await defaultBranch(repository: repository)
+        let reference = try await resolvedReference(ref, repository: repository)
         let treeResponse = try await requestJSON(
             components: ["repos", repo.owner, repo.name, "git", "trees", reference],
             queryItems: [URLQueryItem(name: "recursive", value: "1")]
@@ -2506,7 +2582,7 @@ final class GitHubService {
 
     func fetchRepositorySnapshot(repository: String, ref: String?) async throws -> RepositorySnapshot {
         let repo = try parseRepository(repository)
-        let reference = ref?.nonEmpty ?? try await defaultBranch(repository: repository)
+        let reference = try await resolvedReference(ref, repository: repository)
         let treeResponse = try await requestJSON(
             components: ["repos", repo.owner, repo.name, "git", "trees", reference],
             queryItems: [URLQueryItem(name: "recursive", value: "1")]
@@ -2645,18 +2721,19 @@ final class GitHubService {
     }
 
     private func shouldMirror(path: String) -> Bool {
-        if AgentWorkspaceManager.mirroredPrefixes.contains(path) {
-            return true
-        }
-
-        return AgentWorkspaceManager.mirroredPrefixes.contains { prefix in
-            path.hasPrefix(prefix)
-        }
+        AgentWorkspaceManager.shouldMirrorPath(path)
     }
 
     private func defaultBranch(repository: String) async throws -> String {
         let summary = try await repositorySummary(repository: repository)
         return summary.objectValue?["default_branch"]?.stringValue ?? "main"
+    }
+
+    private func resolvedReference(_ candidate: String?, repository: String) async throws -> String {
+        if let candidate = candidate?.nonEmpty {
+            return candidate
+        }
+        return try await defaultBranch(repository: repository)
     }
 
     private func fetchTextFile(repository: RepositoryID, path: String, ref: String) async throws -> String {
@@ -2918,6 +2995,216 @@ enum JavaScriptRuntimeService {
     }
 }
 
+private enum EmbeddedRuntimeBridgeSupport {
+    typealias RuntimeBridgeFunction = @convention(c) (
+        UnsafePointer<CChar>,
+        UnsafePointer<CChar>?,
+        UnsafePointer<CChar>?
+    ) -> UnsafeMutablePointer<CChar>?
+
+    struct BridgeDescriptor {
+        let frameworkName: String
+        let binaryName: String
+        let symbolName: String
+        let title: String
+        let unavailableReason: String
+    }
+
+    private static func candidateBinaryURLs(for descriptor: BridgeDescriptor) -> [URL] {
+        let fm = FileManager.default
+        var urls: [URL] = []
+
+        if let privateFrameworks = Bundle.main.privateFrameworksURL {
+            urls.append(
+                privateFrameworks
+                    .appendingPathComponent("\(descriptor.frameworkName).framework", isDirectory: true)
+                    .appendingPathComponent(descriptor.binaryName)
+            )
+        }
+
+        if let frameworks = Bundle.main.bundleURL.appendingPathComponent("Frameworks", isDirectory: true) as URL? {
+            urls.append(
+                frameworks
+                    .appendingPathComponent("\(descriptor.frameworkName).framework", isDirectory: true)
+                    .appendingPathComponent(descriptor.binaryName)
+            )
+        }
+
+        if let supportURL = try? fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true) {
+            urls.append(
+                supportURL
+                    .appendingPathComponent("EmbeddedRuntimes", isDirectory: true)
+                    .appendingPathComponent(descriptor.binaryName)
+            )
+        }
+
+        return urls
+    }
+
+    static func isAvailable(_ descriptor: BridgeDescriptor) -> Bool {
+        resolveFunction(descriptor) != nil
+    }
+
+    static func availabilityReason(_ descriptor: BridgeDescriptor) -> String? {
+        isAvailable(descriptor) ? nil : descriptor.unavailableReason
+    }
+
+    private static func resolveFunction(_ descriptor: BridgeDescriptor) -> RuntimeBridgeFunction? {
+        for binaryURL in candidateBinaryURLs(for: descriptor) {
+            let path = binaryURL.path
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+
+            let handle = dlopen(path, RTLD_NOW | RTLD_LOCAL)
+            guard let handle else { continue }
+
+            guard let symbol = dlsym(handle, descriptor.symbolName) else {
+                continue
+            }
+
+            return unsafeBitCast(symbol, to: RuntimeBridgeFunction.self)
+        }
+        return nil
+    }
+
+    static func run(
+        descriptor: BridgeDescriptor,
+        script: String,
+        input: AgentJSONValue?,
+        workspaceRoot: String?
+    ) throws -> AgentJSONValue {
+        guard let function = resolveFunction(descriptor) else {
+            throw AgentWorkspaceError.unsupported(descriptor.unavailableReason)
+        }
+
+        let encodedInput = input?.jsonStringRepresentation ?? "null"
+        let encodedRoot = workspaceRoot ?? ""
+
+        return try script.withCString { scriptCString in
+            try encodedInput.withCString { inputCString in
+                try encodedRoot.withCString { rootCString in
+                    guard let rawPointer = function(scriptCString, inputCString, rootCString) else {
+                        throw AgentWorkspaceError.unsupported("\(descriptor.title) returned no result.")
+                    }
+
+                    let ownedPointer = UnsafeMutablePointer<CChar>(rawPointer)
+                    defer { free(ownedPointer) }
+
+                    let jsonString = String(cString: ownedPointer)
+                    guard let data = jsonString.data(using: .utf8) else {
+                        throw AgentWorkspaceError.unsupported("\(descriptor.title) returned invalid UTF-8.")
+                    }
+
+                    return (try? JSONDecoder().decode(AgentJSONValue.self, from: data))
+                        ?? .object([
+                            "runtime": .string(descriptor.title),
+                            "raw": .string(jsonString)
+                        ])
+                }
+            }
+        }
+    }
+}
+
+private extension AgentJSONValue {
+    var jsonStringRepresentation: String {
+        if let data = try? JSONEncoder().encode(self),
+           let string = String(data: data, encoding: .utf8) {
+            return string
+        }
+        return "null"
+    }
+}
+
+enum PythonRuntimeService {
+    private static let descriptor = EmbeddedRuntimeBridgeSupport.BridgeDescriptor(
+        frameworkName: "OllamaKitPythonRuntime",
+        binaryName: "OllamaKitPythonRuntime",
+        symbolName: "OllamaKitPythonRunJSON",
+        title: "Embedded Python",
+        unavailableReason: "Embedded Python support is not bundled in this build."
+    )
+
+    static var isAvailable: Bool {
+        EmbeddedRuntimeBridgeSupport.isAvailable(descriptor)
+    }
+
+    static var availabilityReason: String? {
+        EmbeddedRuntimeBridgeSupport.availabilityReason(descriptor)
+    }
+
+    static func run(script: String, input: AgentJSONValue?, workspaceRoot: String?) throws -> AgentJSONValue {
+        try EmbeddedRuntimeBridgeSupport.run(
+            descriptor: descriptor,
+            script: script,
+            input: input,
+            workspaceRoot: workspaceRoot
+        )
+    }
+}
+
+enum NodeRuntimeService {
+    private static let descriptor = EmbeddedRuntimeBridgeSupport.BridgeDescriptor(
+        frameworkName: "OllamaKitNodeRuntime",
+        binaryName: "OllamaKitNodeRuntime",
+        symbolName: "OllamaKitNodeRunJSON",
+        title: "Embedded Node.js",
+        unavailableReason: "Embedded Node.js support is not bundled in this build."
+    )
+
+    static var isAvailable: Bool {
+        EmbeddedRuntimeBridgeSupport.isAvailable(descriptor)
+    }
+
+    static var availabilityReason: String? {
+        EmbeddedRuntimeBridgeSupport.availabilityReason(descriptor)
+    }
+
+    static func run(script: String, input: AgentJSONValue?, workspaceRoot: String?) throws -> AgentJSONValue {
+        try EmbeddedRuntimeBridgeSupport.run(
+            descriptor: descriptor,
+            script: script,
+            input: input,
+            workspaceRoot: workspaceRoot
+        )
+    }
+}
+
+enum SwiftRuntimeService {
+    private static let descriptor = EmbeddedRuntimeBridgeSupport.BridgeDescriptor(
+        frameworkName: "OllamaKitSwiftRuntime",
+        binaryName: "OllamaKitSwiftRuntime",
+        symbolName: "OllamaKitSwiftRunJSON",
+        title: "Embedded Swift",
+        unavailableReason: "Embedded SwiftPM runtime support is not bundled in this build."
+    )
+
+    static var isAvailable: Bool {
+        EmbeddedRuntimeBridgeSupport.isAvailable(descriptor)
+    }
+
+    static var availabilityReason: String? {
+        EmbeddedRuntimeBridgeSupport.availabilityReason(descriptor)
+    }
+
+    static func run(script: String, input: AgentJSONValue?, workspaceRoot: String?) throws -> AgentJSONValue {
+        try EmbeddedRuntimeBridgeSupport.run(
+            descriptor: descriptor,
+            script: script,
+            input: input,
+            workspaceRoot: workspaceRoot
+        )
+    }
+}
+
+enum GitService {
+    static let engineIdentifier = "github_snapshot_bridge"
+    static let engineDescription = "Workspace snapshots and GitHub-backed sync are available now. Full local git metadata still depends on a bundled bridge."
+
+    static func cloneRepositoryWorkspace(repository: String, ref: String?) async throws -> AgentWorkspaceRecord {
+        try await AgentWorkspaceManager.shared.cloneRepositoryWorkspace(repository: repository, ref: ref)
+    }
+}
+
 enum ShellToolService {
     enum ShellError: LocalizedError {
         case invalidCommand
@@ -2938,6 +3225,7 @@ enum ShellToolService {
         return ["mkdir", "mv", "rm"].contains(parsed)
     }
 
+    @MainActor
     static func run(command: String, workspaceManager: AgentWorkspaceManager, workspaceID: String?) throws -> AgentJSONValue {
         let tokens = try tokenize(command)
         guard let verb = tokens.first?.lowercased() else {
@@ -3044,6 +3332,7 @@ enum ShellToolService {
 }
 
 enum WebPreviewService {
+    @MainActor
     static func scaffoldStaticApp(workspaceManager: AgentWorkspaceManager, workspaceID: String?) throws -> AgentJSONValue {
         let html = """
         <!doctype html>
@@ -3147,7 +3436,7 @@ final class AgentToolRuntime {
     private init() {}
 
     private func currentRuntimeTier() -> AgentRuntimeTier {
-        AgentWorkspaceManager.shared.workspaces.contains(where: { $0.kind == .bundleLive }) ? .jailbreak : .stockSideload
+        AppSettings.shared.buildVariant == .jailbreak ? .jailbreak : .stockSideload
     }
 
     private func resolvedAgentModel(arguments: [String: AgentJSONValue] = [:]) -> ModelSnapshot? {
@@ -3172,7 +3461,9 @@ final class AgentToolRuntime {
     }
 
     private func runtimeCapabilityProfile() -> AgentCapabilityProfile {
-        let supportsLiveBundleEditing = AgentWorkspaceManager.shared.workspaces.contains(where: { $0.kind == .bundleLive })
+        let supportsLiveBundleEditing =
+            AppSettings.shared.buildVariant.allowsLiveBundleWorkspace &&
+            AgentWorkspaceManager.shared.workspaces.contains(where: { $0.kind == .bundleLive })
         #if canImport(WebKit)
         let supportsEmbeddedBrowser = true
         #else
@@ -3182,9 +3473,11 @@ final class AgentToolRuntime {
             runtimeTier: currentRuntimeTier(),
             supportsEmbeddedBrowser: supportsEmbeddedBrowser,
             supportsJavaScriptRuntime: JavaScriptRuntimeService.isAvailable,
-            supportsPythonRuntime: false,
-            supportsNodeRuntime: false,
+            supportsPythonRuntime: PythonRuntimeService.isAvailable,
+            supportsNodeRuntime: NodeRuntimeService.isAvailable,
+            supportsSwiftRuntime: SwiftRuntimeService.isAvailable,
             supportsGitHubActions: true,
+            supportsManagedRelay: true,
             supportsLiveBundleEditing: supportsLiveBundleEditing,
             supportsExpertBundleEditing: supportsLiveBundleEditing && AppSettings.shared.agentBundleExpertMode
         )
@@ -3212,8 +3505,14 @@ final class AgentToolRuntime {
         if !runtime.supportsNodeRuntime {
             profile = profile.setting(false, for: .nodeRuntime)
         }
+        if !runtime.supportsSwiftRuntime {
+            profile = profile.setting(false, for: .swiftRuntime)
+        }
         if !runtime.supportsGitHubActions {
             profile = profile.setting(false, for: .remoteCI)
+        }
+        if !runtime.supportsManagedRelay {
+            profile = profile.setting(false, for: .managedRelayAccess)
         }
         if !runtime.supportsLiveBundleEditing {
             profile = profile.setting(false, for: .bundleEdits)
@@ -3230,6 +3529,14 @@ final class AgentToolRuntime {
         return profile
     }
 
+    func effectiveCapabilitiesPreview(for model: ModelSnapshot?) -> ModelAgentCapabilityProfile? {
+        effectiveAgentCapabilities(for: model)
+    }
+
+    func runtimeCapabilityPreview() -> AgentCapabilityProfile {
+        runtimeCapabilityProfile()
+    }
+
     private func requiredCapabilities(for toolID: String) -> [AgentToolCapabilityKey] {
         switch toolID {
         case "workspace.list_files", "workspace.read_file", "workspace.search", "workspace.diff_latest_checkpoint":
@@ -3238,12 +3545,16 @@ final class AgentToolRuntime {
             return [.workspaceWrite]
         case "browser.open_tab", "browser.navigate", "browser.back", "browser.forward", "browser.reload", "browser.read_page", "browser.query_dom", "browser.extract_links", "browser.capture":
             return [.browserRead]
+        case "browser.search_web":
+            return [.browserRead, .internetRead]
         case "browser.type", "browser.click", "browser.submit_form":
             return [.browserActions]
         case "browser.download":
             return [.browserActions, .workspaceWrite]
         case "browser.save_page_to_workspace":
             return [.browserRead, .workspaceWrite]
+        case "bundle.patch_history":
+            return [.bundleEdits]
         case "shell.run":
             return [.codeTools]
         case "javascript.run":
@@ -3272,6 +3583,12 @@ final class AgentToolRuntime {
             return [.pythonRuntime]
         case "node.run":
             return [.nodeRuntime]
+        case "swift.run":
+            return [.swiftRuntime]
+        case "relay.status":
+            return [.managedRelayAccess]
+        case "relay.reconnect":
+            return [.managedRelayAccess, .internetWrite]
         case "remote.ssh":
             return [.remoteCI]
         default:
@@ -3344,6 +3661,9 @@ final class AgentToolRuntime {
 
     func toolDescriptors(for model: ModelSnapshot? = nil) -> [AgentToolDescriptor] {
         let jsAvailable = JavaScriptRuntimeService.isAvailable
+        let pythonAvailable = PythonRuntimeService.isAvailable
+        let nodeAvailable = NodeRuntimeService.isAvailable
+        let swiftAvailable = SwiftRuntimeService.isAvailable
         #if canImport(WebKit)
         let browserAvailable = true
         #else
@@ -3370,6 +3690,7 @@ final class AgentToolRuntime {
             AgentToolDescriptor(id: "browser.back", title: "Browser Back", category: .browser, detail: "Navigate backward in the active browser tab.", networkScope: .readOnly, writeScope: .none, needsApproval: false, available: browserAvailable, availabilityReason: browserAvailable ? nil : "WKWebView is unavailable on this build.", timeoutSeconds: 15, quotaDescription: "Single step"),
             AgentToolDescriptor(id: "browser.forward", title: "Browser Forward", category: .browser, detail: "Navigate forward in the active browser tab.", networkScope: .readOnly, writeScope: .none, needsApproval: false, available: browserAvailable, availabilityReason: browserAvailable ? nil : "WKWebView is unavailable on this build.", timeoutSeconds: 15, quotaDescription: "Single step"),
             AgentToolDescriptor(id: "browser.reload", title: "Reload Browser Tab", category: .browser, detail: "Reload the active browser tab.", networkScope: .readOnly, writeScope: .none, needsApproval: false, available: browserAvailable, availabilityReason: browserAvailable ? nil : "WKWebView is unavailable on this build.", timeoutSeconds: 20, quotaDescription: "Single reload"),
+            AgentToolDescriptor(id: "browser.search_web", title: "Search The Web", category: .browser, detail: "Open a web search in the embedded browser using the configured search engine.", networkScope: .readOnly, writeScope: .none, needsApproval: false, available: browserAvailable, availabilityReason: browserAvailable ? nil : "WKWebView is unavailable on this build.", timeoutSeconds: 30, quotaDescription: "Single search"),
             AgentToolDescriptor(id: "browser.read_page", title: "Read Browser Page", category: .browser, detail: "Extract text, HTML, and links from the active page.", networkScope: .readOnly, writeScope: .none, needsApproval: false, available: browserAvailable, availabilityReason: browserAvailable ? nil : "WKWebView is unavailable on this build.", timeoutSeconds: 15, quotaDescription: "120KB HTML"),
             AgentToolDescriptor(id: "browser.query_dom", title: "Query DOM", category: .browser, detail: "Query the active page with a CSS selector.", networkScope: .readOnly, writeScope: .none, needsApproval: false, available: browserAvailable, availabilityReason: browserAvailable ? nil : "WKWebView is unavailable on this build.", timeoutSeconds: 15, quotaDescription: "50 nodes"),
             AgentToolDescriptor(id: "browser.extract_links", title: "Extract Links", category: .browser, detail: "Extract links from the active page.", networkScope: .readOnly, writeScope: .none, needsApproval: false, available: browserAvailable, availabilityReason: browserAvailable ? nil : "WKWebView is unavailable on this build.", timeoutSeconds: 15, quotaDescription: "200 links"),
@@ -3403,10 +3724,13 @@ final class AgentToolRuntime {
             AgentToolDescriptor(id: "github.rerun_workflow", title: "Rerun Workflow", category: .githubActions, detail: "Request a rerun of a GitHub Actions workflow run.", networkScope: .sideEffecting, writeScope: .none, needsApproval: true, available: true, availabilityReason: nil, timeoutSeconds: 20, quotaDescription: "Single rerun"),
             AgentToolDescriptor(id: "github.refresh_builtin_workspace", title: "Refresh Built-In Workspace", category: .github, detail: "Refresh the built-in OllamaKit mirror from GitHub text files.", networkScope: .credentialedRead, writeScope: .workspace, needsApproval: true, available: true, availabilityReason: nil, timeoutSeconds: 120, quotaDescription: "Selected repo snapshot"),
             AgentToolDescriptor(id: "github.push_workspace_snapshot", title: "Push Workspace Snapshot", category: .github, detail: "Push the current workspace files to a GitHub branch using the Git Data API.", networkScope: .sideEffecting, writeScope: .none, needsApproval: true, available: true, availabilityReason: nil, timeoutSeconds: 180, quotaDescription: "Requires repo write access"),
-            AgentToolDescriptor(id: "git.clone_repository", title: "Clone Repository Workspace", category: .git, detail: "Create a local workspace from a GitHub repository snapshot.", networkScope: .readOnly, writeScope: .workspace, needsApproval: true, available: true, availabilityReason: nil, timeoutSeconds: 180, quotaDescription: "Text snapshot clone"),
-            AgentToolDescriptor(id: "git.status", title: "Git-Like Status", category: .git, detail: "Show linked repository, branch, and local workspace diff state.", networkScope: .none, writeScope: .none, needsApproval: false, available: true, availabilityReason: nil, timeoutSeconds: 10, quotaDescription: "Workspace diff only"),
-            AgentToolDescriptor(id: "python.run", title: "Run Python", category: .python, detail: "Planned embedded Python runtime.", networkScope: .none, writeScope: .workspace, needsApproval: false, available: false, availabilityReason: "Embedded Python is not bundled in this build yet.", timeoutSeconds: 0, quotaDescription: "Unavailable"),
-            AgentToolDescriptor(id: "node.run", title: "Run Node/JS Toolchain", category: .node, detail: "Planned embedded Node.js runtime.", networkScope: .none, writeScope: .workspace, needsApproval: false, available: false, availabilityReason: "Embedded Node.js is not bundled in this build yet.", timeoutSeconds: 0, quotaDescription: "Unavailable"),
+            AgentToolDescriptor(id: "git.clone_repository", title: "Clone Repository Workspace", category: .git, detail: "Create a local workspace from a repository snapshot. Full local git metadata still depends on a bundled git bridge.", networkScope: .readOnly, writeScope: .workspace, needsApproval: true, available: true, availabilityReason: nil, timeoutSeconds: 180, quotaDescription: "Snapshot clone"),
+            AgentToolDescriptor(id: "git.status", title: "Repository Status", category: .git, detail: "Show linked repository, branch, and local workspace diff state.", networkScope: .none, writeScope: .none, needsApproval: false, available: true, availabilityReason: nil, timeoutSeconds: 10, quotaDescription: "Workspace diff only"),
+            AgentToolDescriptor(id: "python.run", title: "Run Python", category: .python, detail: "Execute a Python script through the embedded runtime bridge.", networkScope: .none, writeScope: .workspace, needsApproval: false, available: pythonAvailable, availabilityReason: PythonRuntimeService.availabilityReason, timeoutSeconds: pythonAvailable ? 60 : 0, quotaDescription: pythonAvailable ? "Workspace-scoped bridge" : "Unavailable"),
+            AgentToolDescriptor(id: "node.run", title: "Run Node/JS Toolchain", category: .node, detail: "Execute a Node.js script or tooling entrypoint through the embedded runtime bridge.", networkScope: .none, writeScope: .workspace, needsApproval: false, available: nodeAvailable, availabilityReason: NodeRuntimeService.availabilityReason, timeoutSeconds: nodeAvailable ? 60 : 0, quotaDescription: nodeAvailable ? "Workspace-scoped bridge" : "Unavailable"),
+            AgentToolDescriptor(id: "swift.run", title: "Run Swift / SwiftPM", category: .swift, detail: "Execute a Swift script or SwiftPM task through the embedded Swift runtime bridge.", networkScope: .none, writeScope: .workspace, needsApproval: false, available: swiftAvailable, availabilityReason: SwiftRuntimeService.availabilityReason, timeoutSeconds: swiftAvailable ? 120 : 0, quotaDescription: swiftAvailable ? "SwiftPM ceiling" : "Unavailable"),
+            AgentToolDescriptor(id: "relay.status", title: "Managed Relay Status", category: .relay, detail: "Inspect the managed public relay session and assigned public URL.", networkScope: .readOnly, writeScope: .none, needsApproval: false, available: true, availabilityReason: nil, timeoutSeconds: 10, quotaDescription: "Relay session state"),
+            AgentToolDescriptor(id: "relay.reconnect", title: "Reconnect Managed Relay", category: .relay, detail: "Reconnect the managed public relay session for Public Managed mode.", networkScope: .sideEffecting, writeScope: .none, needsApproval: true, available: true, availabilityReason: nil, timeoutSeconds: 30, quotaDescription: "Single reconnect"),
             AgentToolDescriptor(id: "remote.ssh", title: "SSH Remote Runner", category: .remote, detail: "Remote execution is intentionally out of scope in this GitHub-only build.", networkScope: .sideEffecting, writeScope: .none, needsApproval: true, available: false, availabilityReason: "PC, Mac, and SSH runners are disabled in this build.", timeoutSeconds: 0, quotaDescription: "Unavailable")
         ]
         .map { descriptor in
@@ -3642,6 +3966,19 @@ final class AgentToolRuntime {
                 let record = try await BrowserSessionManager.shared.reload(
                     sessionID: UUID(uuidString: arguments["session_id"]?.stringValue ?? "")
                 )
+                result = browserSessionJSON(record)
+#else
+                throw AgentWorkspaceError.unsupported("Embedded browser support is unavailable on this build.")
+#endif
+            case "browser.search_web":
+#if canImport(WebKit)
+                let query = arguments["query"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard !query.isEmpty else {
+                    throw AgentWorkspaceError.invalidInput("query is required.")
+                }
+                let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+                let searchURL = "https://duckduckgo.com/?q=\(encodedQuery)"
+                let record = await BrowserSessionManager.shared.openTab(urlString: searchURL)
                 result = browserSessionJSON(record)
 #else
                 throw AgentWorkspaceError.unsupported("Embedded browser support is unavailable on this build.")
@@ -3897,7 +4234,7 @@ final class AgentToolRuntime {
                 )
             case "git.clone_repository":
                 let repository = arguments["repository"]?.stringValue ?? AppSettings.shared.agentGitHubRepository
-                let workspace = try await AgentWorkspaceManager.shared.cloneRepositoryWorkspace(
+                let workspace = try await GitService.cloneRepositoryWorkspace(
                     repository: repository,
                     ref: arguments["ref"]?.stringValue
                 )
@@ -3908,6 +4245,32 @@ final class AgentToolRuntime {
                 ])
             case "git.status":
                 result = try gitStatusJSON(arguments: arguments)
+            case "python.run":
+                let workspaceRoot = try requiredWorkspace(arguments["workspace_id"]?.stringValue).rootPath
+                result = try PythonRuntimeService.run(
+                    script: arguments["script"]?.stringValue ?? "",
+                    input: arguments["input"],
+                    workspaceRoot: workspaceRoot
+                )
+            case "node.run":
+                let workspaceRoot = try requiredWorkspace(arguments["workspace_id"]?.stringValue).rootPath
+                result = try NodeRuntimeService.run(
+                    script: arguments["script"]?.stringValue ?? "",
+                    input: arguments["input"],
+                    workspaceRoot: workspaceRoot
+                )
+            case "swift.run":
+                let workspaceRoot = try requiredWorkspace(arguments["workspace_id"]?.stringValue).rootPath
+                result = try SwiftRuntimeService.run(
+                    script: arguments["script"]?.stringValue ?? "",
+                    input: arguments["input"],
+                    workspaceRoot: workspaceRoot
+                )
+            case "relay.status":
+                result = ManagedRelayService.shared.agentStatusJSON()
+            case "relay.reconnect":
+                await ManagedRelayService.shared.reconnect()
+                result = ManagedRelayService.shared.agentStatusJSON()
             default:
                 return .failure(toolID: toolID, message: "The tool \(toolID) is not implemented in this build.")
             }
@@ -3958,19 +4321,22 @@ final class AgentToolRuntime {
 
         let capabilityProfile = runtimeCapabilityProfile()
         let modelCapabilities = effectiveAgentCapabilities(for: activeModel)
+        let relayStatus = ManagedRelayService.shared.agentStatusJSON()
 
         let runtimePackages: [RuntimePackageRecord] = [
             RuntimePackageRecord(id: "javascriptcore", title: "JavaScriptCore", runtime: "javascript", available: JavaScriptRuntimeService.isAvailable, availabilityReason: JavaScriptRuntimeService.isAvailable ? nil : "JavaScriptCore unavailable."),
-            RuntimePackageRecord(id: "python", title: "Embedded Python", runtime: "python", available: false, availabilityReason: "Python runtime scaffolding exists, but the embedded interpreter is not vendored in this workspace build."),
-            RuntimePackageRecord(id: "node", title: "Embedded Node.js", runtime: "node", available: false, availabilityReason: "Node runtime scaffolding exists, but nodejs-mobile is not vendored in this workspace build."),
-            RuntimePackageRecord(id: "git", title: "Local Git Layer", runtime: "git", available: true, availabilityReason: "GitHub-backed branch and snapshot operations are available; full libgit2 is not bundled.")
+            RuntimePackageRecord(id: "python", title: "Embedded Python", runtime: "python", available: PythonRuntimeService.isAvailable, availabilityReason: PythonRuntimeService.availabilityReason),
+            RuntimePackageRecord(id: "node", title: "Embedded Node.js", runtime: "node", available: NodeRuntimeService.isAvailable, availabilityReason: NodeRuntimeService.availabilityReason),
+            RuntimePackageRecord(id: "swift", title: "Embedded Swift", runtime: "swift", available: SwiftRuntimeService.isAvailable, availabilityReason: SwiftRuntimeService.availabilityReason),
+            RuntimePackageRecord(id: "git", title: "Repository Sync", runtime: "git", available: true, availabilityReason: GitService.engineDescription)
         ]
 
         return .object([
             "app": .object([
                 "name": .string(Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "OllamaKit"),
                 "version": .string(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown"),
-                "build": .string(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Unknown")
+                "build": .string(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Unknown"),
+                "build_variant": .string(AppSettings.shared.buildVariant.rawValue)
             ]),
             "device": .object([
                 "system_version": .string(runtimeProfile.systemVersion),
@@ -3987,7 +4353,8 @@ final class AgentToolRuntime {
                 "enabled": .bool(AppSettings.shared.serverEnabled),
                 "exposure_mode": .string(AppSettings.shared.serverExposureMode.rawValue),
                 "canonical_url": .string(AppSettings.shared.serverURL),
-                "requires_api_key": .bool(AppSettings.shared.isAPIKeyRequiredForCurrentExposure)
+                "requires_api_key": .bool(AppSettings.shared.isAPIKeyRequiredForCurrentExposure),
+                "managed_relay": relayStatus
             ]),
             "agent": .object([
                 "enabled": .bool(AppSettings.shared.powerAgentEnabled),
@@ -3996,6 +4363,7 @@ final class AgentToolRuntime {
                 "github_repository": .string(AppSettings.shared.agentGitHubRepository),
                 "github_client_id_present": .bool(AppSettings.shared.agentGitHubClientID.nonEmpty != nil),
                 "active_workspace_id": .string(AgentWorkspaceManager.shared.activeWorkspaceID),
+                "build_variant": .string(AppSettings.shared.buildVariant.rawValue),
                 "runtime_tier": .string(capabilityProfile.runtimeTier.rawValue),
                 "active_model_id": .string(activeModel?.catalogId ?? ""),
                 "active_model_name": .string(activeModel?.displayName ?? ""),
@@ -4024,12 +4392,15 @@ final class AgentToolRuntime {
                 "recent_validation_errors": .array(failedModels.prefix(10).map(AgentJSONValue.string))
             ]),
             "capabilities": .object([
+                "build_variant": .string(AppSettings.shared.buildVariant.rawValue),
                 "runtime_tier": .string(capabilityProfile.runtimeTier.rawValue),
                 "embedded_browser": .bool(capabilityProfile.supportsEmbeddedBrowser),
                 "javascript_runtime": .bool(capabilityProfile.supportsJavaScriptRuntime),
                 "python_runtime": .bool(capabilityProfile.supportsPythonRuntime),
                 "node_runtime": .bool(capabilityProfile.supportsNodeRuntime),
+                "swift_runtime": .bool(capabilityProfile.supportsSwiftRuntime),
                 "github_actions": .bool(capabilityProfile.supportsGitHubActions),
+                "managed_relay": .bool(capabilityProfile.supportsManagedRelay),
                 "live_bundle_editing": .bool(capabilityProfile.supportsLiveBundleEditing),
                 "expert_bundle_editing": .bool(capabilityProfile.supportsExpertBundleEditing)
             ]),
@@ -4112,10 +4483,12 @@ final class AgentToolRuntime {
             "js_runtime": .bool(profile.jsRuntime),
             "python_runtime": .bool(profile.pythonRuntime),
             "node_runtime": .bool(profile.nodeRuntime),
+            "swift_runtime": .bool(profile.swiftRuntime),
             "git_read": .bool(profile.gitRead),
             "git_write": .bool(profile.gitWrite),
             "github_access": .bool(profile.githubAccess),
             "remote_ci": .bool(profile.remoteCI),
+            "managed_relay_access": .bool(profile.managedRelayAccess),
             "bundle_edits": .bool(profile.bundleEdits)
         ])
     }
@@ -4244,6 +4617,8 @@ final class AgentToolRuntime {
             return "Refresh the built-in workspace from \(arguments["repository"]?.stringValue ?? AppSettings.shared.agentGitHubRepository)."
         case "github.push_workspace_snapshot":
             return "Push the current workspace snapshot to \(arguments["repository"]?.stringValue ?? AppSettings.shared.agentGitHubRepository)."
+        case "relay.reconnect":
+            return "Reconnect the managed public relay session."
         case "shell.run":
             return "Run the shell-style command: \(arguments["command"]?.stringValue ?? "")"
         default:

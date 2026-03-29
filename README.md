@@ -28,8 +28,8 @@ A powerful iOS app for running local Large Language Models (LLMs) with an OpenAI
 
 ### Server Features
 - Configurable port (default: 11434)
-- Local-only, local-network, and public-URL exposure modes
-- Automatic API-key enforcement for public URL mode
+- Local-only, local-network, managed-public-relay, and custom-public-URL exposure modes
+- Automatic API-key enforcement for public exposure modes
 - Live structured server logs with request, response, auth, model-load, and stream details
 - Background task management
 - Capability-aware Ollama-style and OpenAI-style routes, including `/api/show` and `/v1/responses`
@@ -37,20 +37,23 @@ A powerful iOS app for running local Large Language Models (LLMs) with an OpenAI
 
 ### Sideload Power Agent
 - Built-in mutable OllamaKit workspace mirror stored under app support, with the installed app bundle kept read-only
+- Deterministic embedded workspace seed generated from tracked text files, with CI drift detection
 - Extra internal workspaces for mutable data, downloaded pages/assets, and GitHub-backed repo clones
 - Workspace tools for listing, reading, searching, diffing, writing, moving, deleting, activating, cloning, and resetting files
 - Automatic checkpoints before destructive agent operations, with manual restore points from the UI
 - Embedded browser sessions with DOM reading, link extraction, screenshots, page saving, downloads, and approval-gated form actions
 - Agent tab for runtime context, approvals, checkpoints, browser tabs, GitHub auth/search/actions flows, preview status, bundle patch history, and live agent logs
 - Local static web preview scaffolding plus JavaScriptCore-backed script execution
+- Bridge-based embedded runtime slots for Python, Node.js, and Swift/SwiftPM with runtime inventory reporting
 - GitHub repository metadata, repo/code search, issues, pull requests, workflow-run lookup, workspace refresh, repo snapshot clone, branch creation, PR creation, and branch snapshot push support
 - Explicit tool inventory with approval-gated write and network-side-effect actions
 - Conservative per-model agent capability defaults, with manual override controls in the model catalog
 - Browser, workspace, GitHub, runtime, and remote-CI tools only expose themselves when the active model is allowed to use them
 - Optional live-bundle workspace on writable jailbreak-style installs, with per-file backups and restart-oriented patch history
+- Manual release smoke checklist in `Scripts/release-smoke-checklist.md`
 
 > [!NOTE]
-> The current power-agent build ships the workspace, checkpoint, browser, GitHub, restricted shell-style, JavaScript, preview, and `/api/agent/*` surfaces now. Embedded Python and embedded Node.js still remain feature-gated tool slots because their vendored runtimes are not bundled in this workspace build yet.
+> The current power-agent build ships the workspace, checkpoint, browser, GitHub, restricted shell-style, JavaScript, preview, managed-relay plumbing, and `/api/agent/*` surfaces now. Python, Node.js, and Swift runtime tools only become available when their embedded bridge frameworks are actually bundled into the build, and the UI/API report that runtime truth explicitly.
 
 ### iOS 26 Liquid Glass Design
 - Animated mesh gradient backgrounds
@@ -75,11 +78,12 @@ A powerful iOS app for running local Large Language Models (LLMs) with an OpenAI
 ## Installation
 
 This project is aimed at sideloaded installs. The power-agent functionality is designed for that profile and is not constrained to an App Store-safe feature set.
+GitHub Actions now produces two unsigned IPA variants from the same codebase: `stockSideload` and `jailbreak`.
 
 ### Download Pre-built IPA
 
-1. Go to the [Releases](https://github.com/yourusername/OllamaKit/releases) page
-2. Download the latest `OllamaKit-unsigned.ipa`
+1. Go to the [Releases](https://github.com/NightVibes3/OllamaKit/releases) page
+2. Download either `OllamaKit-stockSideload-unsigned.ipa` or `OllamaKit-jailbreak-unsigned.ipa`
 3. Sign and install using one of the methods below
 
 ### Sign with AltStore
@@ -119,7 +123,7 @@ This project is aimed at sideloaded installs. The power-agent functionality is d
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/OllamaKit.git
+git clone https://github.com/NightVibes3/OllamaKit.git
 cd OllamaKit
 
 # Build the llama.cpp iOS XCFramework
@@ -132,6 +136,15 @@ open OllamaKit.xcodeproj
 # Or build from command line
 xcodebuild -project OllamaKit.xcodeproj -scheme OllamaKit -configuration Release
 ```
+
+### Build Variants
+
+The app now uses one codebase with two release variants:
+
+- `stockSideload` for the normal sideload profile
+- `jailbreak` for builds that are allowed to expose the live bundle workspace
+
+The active variant is embedded into the app bundle as `OllamaKitBuildVariant` and is also surfaced through the agent/server context endpoints.
 
 ## Agent API
 
@@ -152,26 +165,48 @@ Browser navigation, GitHub search, workflow inspection, bundle patch history, re
 ### Build Unsigned IPA
 
 ```bash
+# Keep the embedded workspace seed in sync
+python3 Scripts/generate-agent-workspace-seed.py --check
+
 # Build the llama.cpp iOS XCFramework
 git clone --depth 1 --branch b8548 https://github.com/ggml-org/llama.cpp.git .deps/llama.cpp
 bash Scripts/build-llama-ios-xcframework.sh ./.deps/llama.cpp ./Vendor/llama.xcframework
 
-# Build archive
+# Build stock sideload archive
 xcodebuild archive \
   -project OllamaKit.xcodeproj \
   -scheme OllamaKit \
   -configuration Release \
   -sdk iphoneos \
-  -archivePath build/OllamaKit.xcarchive \
+  -archivePath build/OllamaKit-stock.xcarchive \
   CODE_SIGN_IDENTITY="" \
   CODE_SIGNING_REQUIRED=NO \
-  CODE_SIGNING_ALLOWED=NO
+  CODE_SIGNING_ALLOWED=NO \
+  OLLAMAKIT_BUILD_VARIANT=stockSideload \
+  OTHER_SWIFT_FLAGS="$(inherited) -D OLLAMAKIT_VARIANT_STOCK_SIDELOAD"
 
-# Create IPA
+# Build jailbreak archive
+xcodebuild archive \
+  -project OllamaKit.xcodeproj \
+  -scheme OllamaKit \
+  -configuration Release \
+  -sdk iphoneos \
+  -archivePath build/OllamaKit-jailbreak.xcarchive \
+  CODE_SIGN_IDENTITY="" \
+  CODE_SIGNING_REQUIRED=NO \
+  CODE_SIGNING_ALLOWED=NO \
+  OLLAMAKIT_BUILD_VARIANT=jailbreak \
+  OTHER_SWIFT_FLAGS="$(inherited) -D OLLAMAKIT_VARIANT_JAILBREAK" \
+  PRODUCT_BUNDLE_IDENTIFIER=com.ollamakit.app.jailbreak \
+  PRODUCT_NAME=OllamaKitJailbreak
+
+# Create stock IPA
 mkdir -p build/Payload
-cp -R build/OllamaKit.xcarchive/Products/Applications/OllamaKit.app build/Payload/
-cd build && zip -r OllamaKit-unsigned.ipa Payload
+cp -R build/OllamaKit-stock.xcarchive/Products/Applications/OllamaKit.app build/Payload/
+cd build && zip -r OllamaKit-stockSideload-unsigned.ipa Payload
 ```
+
+Repeat the `Payload` packaging step for `build/OllamaKit-jailbreak.xcarchive/Products/Applications/OllamaKitJailbreak.app` to create `OllamaKit-jailbreak-unsigned.ipa`.
 
 ## Usage
 
@@ -229,10 +264,12 @@ When multiple downloaded files come from the same Hugging Face repo, use the exa
 1. Choose an exposure mode in the **Server** tab:
    - `Local Only` for loopback clients
    - `Local Network` for other devices on the same reachable network
-   - `Public URL` for a user-managed tunnel or reverse proxy URL
+   - `Managed Public URL` to keep a device tunnel open to the configured OllamaKit relay service
+   - `Custom Public URL` for your own tunnel or reverse proxy URL
 2. For `Local Network`, use the Network URL shown in the Server tab.
-3. For `Public URL`, enter the external `http://` or `https://` URL from your tunnel or reverse proxy. OllamaKit does not create the tunnel for you.
-4. Include the API key in requests whenever authentication is enabled. Public URL mode always requires an API key:
+3. For `Managed Public URL`, enter the relay service URL. The app will register the device and show the assigned public endpoint once the relay connects.
+4. For `Custom Public URL`, enter the external `http://` or `https://` URL from your tunnel or reverse proxy. OllamaKit does not create the tunnel in that mode.
+5. Include the API key in requests whenever authentication is enabled. Public exposure modes always require an API key:
 
 ```bash
 curl -H "Authorization: Bearer YOUR_API_KEY" \
@@ -370,8 +407,8 @@ This app is not affiliated with Ollama or Hugging Face. Use at your own risk. Ru
 
 ## Support
 
-- [GitHub Issues](https://github.com/yourusername/OllamaKit/issues)
-- [Discussions](https://github.com/yourusername/OllamaKit/discussions)
+- [GitHub Issues](https://github.com/NightVibes3/OllamaKit/issues)
+- [Discussions](https://github.com/NightVibes3/OllamaKit/discussions)
 
 ---
 

@@ -20,6 +20,10 @@
     <string>1.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
+    <key>OllamaKitBuildVariant</key>
+    <string>$(OLLAMAKIT_BUILD_VARIANT)</string>
+    <key>OllamaKitManagedRelayBaseURL</key>
+    <string></string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>BGTaskSchedulerPermittedIdentifiers</key>

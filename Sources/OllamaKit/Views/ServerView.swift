@@ -8,6 +8,7 @@ import Darwin
 
 struct ServerView: View {
     @ObservedObject private var settings = AppSettings.shared
+    @StateObject private var relay = ManagedRelayService.shared
     @StateObject private var viewModel = ServerViewModel()
     
     var body: some View {
@@ -73,7 +74,22 @@ struct ServerView: View {
                 await viewModel.refreshPublicHealth()
             }
         }
+        .onChange(of: settings.managedRelayBaseURL) {
+            Task {
+                await viewModel.refreshPublicHealth()
+            }
+        }
+        .onChange(of: settings.managedRelayAssignedURL) {
+            Task {
+                await viewModel.refreshPublicHealth()
+            }
+        }
         .onChange(of: settings.requireApiKey) {
+            Task {
+                await viewModel.refreshPublicHealth()
+            }
+        }
+        .onChange(of: relay.state) {
             Task {
                 await viewModel.refreshPublicHealth()
             }
@@ -134,6 +150,16 @@ struct ServerStatusCard: View {
                             )
 
                         Text(AppSettings.shared.serverExposureMode.title)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(
+                                Capsule()
+                                    .fill(.ultraThinMaterial)
+                            )
+
+                        Text(AppSettings.shared.buildVariant.title)
                             .font(.system(size: 13, weight: .medium))
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 12)
@@ -218,7 +244,7 @@ struct ConnectionInfoCard: View {
                     )
                 }
 
-                if AppSettings.shared.serverExposureMode == .publicURL {
+                if AppSettings.shared.serverExposureMode.isPublic {
                     Divider()
 
                     URLRow(
@@ -232,6 +258,14 @@ struct ConnectionInfoCard: View {
                         status: viewModel.publicHealthTitle,
                         tint: viewModel.publicHealthColor
                     )
+
+                    if AppSettings.shared.serverExposureMode == .publicManaged {
+                        HealthStatusRow(
+                            title: "Relay State",
+                            status: ManagedRelayService.shared.state.rawValue.capitalized,
+                            tint: viewModel.publicHealthColor
+                        )
+                    }
                 }
             }
 
@@ -407,14 +441,51 @@ struct ServerSettingsSection: View {
             .pickerStyle(.menu)
             .padding(.vertical, 12)
 
-            if settings.serverExposureMode == .publicURL {
+            if settings.serverExposureMode == .publicManaged {
                 Divider()
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Public Base URL")
+                    Text("Managed Relay Service URL")
                         .font(.system(size: 16, weight: .medium))
 
-                    Text("Use the public URL from your tunnel or reverse proxy. This app does not create the tunnel for you.")
+                    Text("OllamaKit will register this device with the relay service, keep a device tunnel open, and surface the assigned worldwide public URL when the relay connects.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+
+                    TextField("https://your-relay-service.workers.dev", text: $settings.managedRelayBaseURL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.system(size: 14, design: .monospaced))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(.ultraThinMaterial)
+                        )
+
+                    if settings.normalizedManagedRelayBaseURL == nil {
+                        Text("Enter a valid http:// or https:// relay service URL to use Managed Public URL mode.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.orange)
+                    }
+
+                    if let assignedURL = settings.managedRelayAssignedURL.nonEmpty {
+                        Text("Assigned URL: \(assignedURL)")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 12)
+            }
+
+            if settings.serverExposureMode == .publicCustom {
+                Divider()
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Custom Public Base URL")
+                        .font(.system(size: 16, weight: .medium))
+
+                    Text("Use the public URL from your own tunnel or reverse proxy. OllamaKit will treat it as the canonical remote endpoint but will not create the tunnel itself.")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
 
@@ -430,7 +501,7 @@ struct ServerSettingsSection: View {
                         )
 
                     if settings.normalizedPublicBaseURL == nil {
-                        Text("Enter a valid http:// or https:// URL to use Public URL mode.")
+                        Text("Enter a valid http:// or https:// URL to use Custom Public URL mode.")
                             .font(.system(size: 12))
                             .foregroundStyle(.orange)
                     }
@@ -460,20 +531,22 @@ struct SecuritySettingsSection: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Require API Key")
                         .font(.system(size: 16, weight: .medium))
-                    Text(settings.serverExposureMode == .publicURL
-                        ? "Required in Public URL mode"
+                    Text(settings.serverExposureMode.isPublic
+                        ? "Required in public exposure modes"
                         : "Protect server with authentication")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                 }
             }
-            .disabled(settings.serverExposureMode == .publicURL)
+            .disabled(settings.serverExposureMode.isPublic)
             .padding(.vertical, 12)
 
-            if settings.serverExposureMode == .publicURL {
+            if settings.serverExposureMode.isPublic {
                 Divider()
 
-                Text("Public URL mode always requires API-key authentication. Keep this key private and configure your external tunnel or proxy to forward it securely.")
+                Text(settings.serverExposureMode == .publicManaged
+                     ? "Managed public relay mode always requires API-key authentication. The relay authenticates the device separately, but remote API clients must still send your API key."
+                     : "Custom public URL mode always requires API-key authentication. Keep this key private and configure your tunnel or proxy to forward it securely.")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 12)
@@ -918,14 +991,14 @@ struct APIDocumentationView: View {
                 VStack(alignment: .leading, spacing: 24) {
                     // Introduction
                     DocSection(title: "Introduction") {
-                        Text("OllamaKit provides an on-device API server with Ollama-style routes and a richer OpenAI-compatible `/v1` surface. The canonical endpoint can be local, local-network, or a user-managed public URL from an external tunnel or reverse proxy. Only models that are installed, validated, and server-runnable on this device are exposed through the model-list routes.")
+                        Text("OllamaKit provides an on-device API server with Ollama-style routes and a richer OpenAI-compatible `/v1` surface. The canonical endpoint can be local, local-network, a managed public relay URL, or a custom public URL from your own tunnel or reverse proxy. Only models that are installed, validated, and server-runnable on this device are exposed through the model-list routes.")
                             .font(.system(size: 15))
                     }
                     
                     // Authentication
                     DocSection(title: "Authentication") {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("If API key protection is enabled, or if the server is in Public URL mode, include it in the Authorization header:")
+                            Text("If API key protection is enabled, or if the server is in a public exposure mode, include it in the Authorization header:")
                                 .font(.system(size: 15))
                             
                             CodeBlock(code: "Authorization: Bearer YOUR_API_KEY")
@@ -1225,11 +1298,11 @@ enum PublicURLHealthState {
         case .hidden:
             return "Public URL mode is not active."
         case .notConfigured:
-            return "Enter a valid public tunnel or reverse-proxy URL."
+            return "Configure either a managed relay service URL or a custom public URL."
         case .checking:
-            return "Checking the configured public endpoint."
+            return "Checking the configured public endpoint or relay session."
         case .healthy:
-            return "The configured public URL responded successfully."
+            return "The configured public endpoint is healthy."
         case .unreachable(let detail):
             return detail
         case .invalid:
@@ -1310,8 +1383,33 @@ class ServerViewModel: ObservableObject {
     }
 
     func refreshPublicHealth() async {
-        guard AppSettings.shared.serverExposureMode == .publicURL else {
+        guard AppSettings.shared.serverExposureMode.isPublic else {
             publicHealthState = .hidden
+            return
+        }
+
+        if AppSettings.shared.serverExposureMode == .publicManaged {
+            let relay = ManagedRelayService.shared
+            guard AppSettings.shared.normalizedManagedRelayBaseURL != nil else {
+                publicHealthState = AppSettings.shared.managedRelayBaseURL.trimmedForLookup.isEmpty ? .notConfigured : .invalid
+                return
+            }
+
+            guard isRunning else {
+                publicHealthState = .unreachable("The on-device server is not running.")
+                return
+            }
+
+            switch relay.state {
+            case .connected:
+                publicHealthState = .healthy
+            case .registering, .connecting:
+                publicHealthState = .checking
+            case .error:
+                publicHealthState = .unreachable(relay.lastError ?? "Managed relay failed.")
+            case .disconnected:
+                publicHealthState = .unreachable("The managed relay is disconnected.")
+            }
             return
         }
 
@@ -1320,13 +1418,13 @@ class ServerViewModel: ObservableObject {
             return
         }
 
-        guard let url = URL(string: urlString) else {
-            publicHealthState = .invalid
+        guard isRunning else {
+            publicHealthState = .unreachable("The on-device server is not running.")
             return
         }
 
-        guard isRunning else {
-            publicHealthState = .unreachable("The on-device server is not running.")
+        guard let url = URL(string: urlString) else {
+            publicHealthState = .invalid
             return
         }
 
@@ -1346,8 +1444,8 @@ class ServerViewModel: ObservableObject {
                     ServerLogEntry(
                         level: .info,
                         category: .health,
-                        title: "Public URL Healthy",
-                        message: "The configured public endpoint responded successfully.",
+                        title: "Custom Public URL Healthy",
+                        message: "The configured custom public endpoint responded successfully.",
                         metadata: [
                             "url": urlString,
                             "status": String(httpResponse.statusCode)
@@ -1355,9 +1453,9 @@ class ServerViewModel: ObservableObject {
                     )
                 )
             } else if let httpResponse = response as? HTTPURLResponse {
-                publicHealthState = .unreachable("The public endpoint returned HTTP \(httpResponse.statusCode).")
+                publicHealthState = .unreachable("The custom public endpoint returned HTTP \(httpResponse.statusCode).")
             } else {
-                publicHealthState = .unreachable("The public endpoint returned an unexpected response.")
+                publicHealthState = .unreachable("The custom public endpoint returned an unexpected response.")
             }
         } catch {
             publicHealthState = .unreachable(error.localizedDescription)
@@ -1365,7 +1463,7 @@ class ServerViewModel: ObservableObject {
                 ServerLogEntry(
                     level: .warning,
                     category: .health,
-                    title: "Public URL Unreachable",
+                    title: "Custom Public URL Unreachable",
                     message: error.localizedDescription,
                     metadata: ["url": urlString]
                 )
