@@ -92,9 +92,9 @@ final class AgentCapabilityTests: XCTestCase {
         let override = ModelAgentCapabilityOverride(
             browserActions: true,
             internetWrite: true,
+            swiftRuntime: true,
             gitWrite: true,
             remoteCI: true,
-            swiftRuntime: true,
             managedRelayAccess: true,
             bundleEdits: false
         )

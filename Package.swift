@@ -1,33 +1,37 @@
 // swift-tools-version:5.9
+import Foundation
 import PackageDescription
 
-let package = Package(
-    name: "OllamaKit",
-    platforms: [
-        .iOS("26.0"),
-        .macOS("15.0")
-    ],
-    products: [
-        .library(
-            name: "OllamaCore",
-            targets: ["OllamaCore"]
-        ),
+let skipOllamaKitPackageTarget = ProcessInfo.processInfo.environment["SKIP_OLLAMAKIT_PACKAGE_TARGET"] == "1"
+
+var products: [Product] = [
+    .library(
+        name: "OllamaCore",
+        targets: ["OllamaCore"]
+    )
+]
+
+if !skipOllamaKitPackageTarget {
+    products.append(
         .library(
             name: "OllamaKit",
             targets: ["OllamaKit"]
         )
-    ],
-    dependencies: [
-        .package(path: "Vendor/anemll-swift-cli")
-    ],
-    targets: [
-        .target(
-            name: "OllamaCore",
-            dependencies: [
-                .product(name: "AnemllCore", package: "anemll-swift-cli")
-            ],
-            path: "Sources/OllamaCore"
-        ),
+    )
+}
+
+var targets: [Target] = [
+    .target(
+        name: "OllamaCore",
+        dependencies: [
+            .product(name: "AnemllCore", package: "anemll-swift-cli")
+        ],
+        path: "Sources/OllamaCore"
+    )
+]
+
+if !skipOllamaKitPackageTarget {
+    targets.append(
         .target(
             name: "OllamaKit",
             dependencies: ["OllamaCore"],
@@ -36,11 +40,27 @@ let package = Package(
             resources: [
                 .process("Assets.xcassets")
             ]
-        ),
-        .testTarget(
-            name: "OllamaCoreTests",
-            dependencies: ["OllamaCore"],
-            path: "Tests/OllamaCoreTests"
         )
-    ]
+    )
+}
+
+targets.append(
+    .testTarget(
+        name: "OllamaCoreTests",
+        dependencies: ["OllamaCore"],
+        path: "Tests/OllamaCoreTests"
+    )
+)
+
+let package = Package(
+    name: "OllamaKit",
+    platforms: [
+        .iOS("26.0"),
+        .macOS("15.0")
+    ],
+    products: products,
+    dependencies: [
+        .package(path: "Vendor/anemll-swift-cli")
+    ],
+    targets: targets
 )
