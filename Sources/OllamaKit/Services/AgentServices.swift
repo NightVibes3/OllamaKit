@@ -1172,7 +1172,7 @@ private extension WKWebView {
     }
 
     func evaluateJavaScriptAsync(_ script: String) async throws -> Any? {
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Any?, Error>) in
             evaluateJavaScript(script) { value, error in
                 if let error {
                     continuation.resume(throwing: error)
@@ -1184,7 +1184,7 @@ private extension WKWebView {
     }
 
     func agentSnapshot() async throws -> UIImage {
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UIImage, Error>) in
             takeSnapshot(with: nil) { image, error in
                 if let image {
                     continuation.resume(returning: image)

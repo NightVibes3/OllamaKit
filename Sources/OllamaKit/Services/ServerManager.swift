@@ -231,7 +231,7 @@ final class ManagedRelayService: ObservableObject {
             do {
                 try await Task.sleep(for: .seconds(20))
                 guard let webSocketTask else { return }
-                try await withCheckedThrowingContinuation { continuation in
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                     webSocketTask.sendPing { error in
                         if let error {
                             continuation.resume(throwing: error)
@@ -389,7 +389,7 @@ final class ManagedRelayService: ObservableObject {
     }
 
     private func receiveMessage(on task: URLSessionWebSocketTask) async throws -> URLSessionWebSocketTask.Message {
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URLSessionWebSocketTask.Message, Error>) in
             task.receive { result in
                 continuation.resume(with: result)
             }

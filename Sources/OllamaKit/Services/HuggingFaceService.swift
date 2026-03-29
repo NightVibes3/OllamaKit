@@ -346,7 +346,7 @@ final class HuggingFaceService: @unchecked Sendable {
         id: String,
         progressHandler: @escaping (DownloadProgress) -> Void
     ) async throws -> (URL, URLResponse) {
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(URL, URLResponse), Error>) in
             let downloadToken = UUID()
             let startedAt = Date()
             let task = session.downloadTask(with: request) { [weak self] temporaryURL, response, error in
