@@ -14,7 +14,7 @@ public actor RuntimeCoordinator {
     private let registry = ModelRegistryStore.shared
     private let capabilityService = DeviceCapabilityService.shared
     private let ggufBackend = GGUFBackend()
-    private let appleBackend: InferenceBackend = Self.makeAppleFoundationBackend()
+    private let appleBackend: InferenceBackend = RuntimeCoordinator.makeAppleFoundationBackend()
     private let coreMLBackend = CoreMLPackageBackend()
 
     private var activeCatalogIdValue: String?
@@ -225,10 +225,6 @@ final class AppleFoundationBackend: InferenceBackend, @unchecked Sendable {
         }
 
         #if canImport(FoundationModels)
-        guard #available(iOS 26.0, macOS 26.0, *) else {
-            throw InferenceError.appleModelUnavailable("Apple's on-device model requires iOS 26 or newer.")
-        }
-
         await stopGeneration()
 
         let requestID = UUID()
