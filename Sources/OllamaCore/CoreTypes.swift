@@ -1282,7 +1282,7 @@ public struct InferenceRequest: Sendable {
         self.catalogId = catalogId
         self.prompt = prompt
         self.systemPrompt = systemPrompt
-        self.conversationTurns = ConversationPrompting.normalizedTurns(conversationTurns)
+        self.conversationTurns = conversationTurns
         self.tools = tools
         self.reasoning = reasoning
         self.parameters = parameters
