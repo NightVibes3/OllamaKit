@@ -14,7 +14,7 @@ public actor RuntimeCoordinator {
     private let registry = ModelRegistryStore.shared
     private let capabilityService = DeviceCapabilityService.shared
     private let ggufBackend = GGUFBackend()
-    private let appleBackend = AppleFoundationBackend()
+    private let appleBackend: InferenceBackend = Self.makeAppleFoundationBackend()
     private let coreMLBackend = CoreMLPackageBackend()
 
     private var activeCatalogIdValue: String?
@@ -148,8 +148,46 @@ public actor RuntimeCoordinator {
             return coreMLBackend
         }
     }
+
+    private static func makeAppleFoundationBackend() -> InferenceBackend {
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, macOS 26.0, *) {
+            return AppleFoundationBackend()
+        }
+        #endif
+
+        return UnsupportedAppleFoundationBackend()
+    }
 }
 
+final class UnsupportedAppleFoundationBackend: InferenceBackend, @unchecked Sendable {
+    let kind: ModelBackendKind = .appleFoundation
+
+    var activeCatalogId: String? { nil }
+
+    func load(entry: ModelCatalogEntry, runtime: RuntimePreferences) async throws {
+        let _ = entry
+        let _ = runtime
+        throw InferenceError.appleModelUnavailable("Apple's on-device model requires iOS 26 or macOS 26 or newer.")
+    }
+
+    func unload() async {}
+
+    func generate(
+        entry: ModelCatalogEntry,
+        request: InferenceRequest,
+        onChunk: @escaping @Sendable (InferenceChunk) -> Void
+    ) async throws -> InferenceResult {
+        let _ = entry
+        let _ = request
+        let _ = onChunk
+        throw InferenceError.appleModelUnavailable("Apple's on-device model requires iOS 26 or macOS 26 or newer.")
+    }
+
+    func stopGeneration() async {}
+}
+
+@available(iOS 26.0, macOS 26.0, *)
 final class AppleFoundationBackend: InferenceBackend, @unchecked Sendable {
     let kind: ModelBackendKind = .appleFoundation
 
@@ -187,7 +225,7 @@ final class AppleFoundationBackend: InferenceBackend, @unchecked Sendable {
         }
 
         #if canImport(FoundationModels)
-        guard #available(iOS 26.0, *) else {
+        guard #available(iOS 26.0, macOS 26.0, *) else {
             throw InferenceError.appleModelUnavailable("Apple's on-device model requires iOS 26 or newer.")
         }
 

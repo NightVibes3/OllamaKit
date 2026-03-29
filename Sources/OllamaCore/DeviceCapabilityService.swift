@@ -95,12 +95,12 @@ public actor DeviceCapabilityService {
 
     public func appleFoundationAvailability() async -> CompatibilityReport {
         #if canImport(FoundationModels)
-        guard #available(iOS 26.0, *) else {
+        guard #available(iOS 26.0, macOS 26.0, *) else {
             return CompatibilityReport(
                 backendKind: .appleFoundation,
                 level: .unavailable,
                 title: "Unavailable",
-                message: "Apple's built-in on-device model requires iOS 26 or newer."
+                message: "Apple's built-in on-device model requires iOS 26 or macOS 26 or newer."
             )
         }
 
