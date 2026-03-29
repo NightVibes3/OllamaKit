@@ -20,6 +20,46 @@ final class GGUFBackend: InferenceBackend, @unchecked Sendable {
     private var _activeCatalogId: String?
     private var _loadedModelPath: String?
 
+    func validate(entry: ModelCatalogEntry, runtime: RuntimePreferences) async throws {
+        guard let path = entry.localPath?.trimmedForLookup, !path.isEmpty else {
+            throw InferenceError.invalidPath
+        }
+
+        guard FileManager.default.fileExists(atPath: path) else {
+            throw InferenceError.modelNotFound("Model file not found at the stored path. Please re-download the model.")
+        }
+
+        let configuration = BackendConfiguration(
+            catalogId: entry.catalogId,
+            modelPath: path,
+            contextLength: runtime.contextLength,
+            gpuLayers: runtime.gpuLayers,
+            threads: runtime.threads,
+            batchSize: runtime.batchSize,
+            flashAttentionEnabled: runtime.flashAttentionEnabled,
+            mmapEnabled: runtime.mmapEnabled,
+            mlockEnabled: runtime.mlockEnabled
+        )
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            queue.async {
+                do {
+                    let temporaryEngine = try BackendEngine(configuration: configuration)
+                    withExtendedLifetime(temporaryEngine) {}
+                    continuation.resume()
+                } catch {
+                    let fileName = URL(fileURLWithPath: path).lastPathComponent
+                    let sizeDescription = ByteCountFormatter.string(
+                        fromByteCount: entry.capabilitySummary.sizeBytes,
+                        countStyle: .file
+                    )
+                    let message = "GGUF validation failed for \(entry.displayName) (\(fileName), \(sizeDescription), \(entry.capabilitySummary.quantization)): \(error.localizedDescription)"
+                    continuation.resume(throwing: InferenceError.backendUnavailable(message))
+                }
+            }
+        }
+    }
+
     func load(entry: ModelCatalogEntry, runtime: RuntimePreferences) async throws {
         guard let path = entry.localPath?.trimmedForLookup, !path.isEmpty else {
             throw InferenceError.invalidPath

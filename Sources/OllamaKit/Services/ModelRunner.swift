@@ -35,6 +35,19 @@ final class ModelRunner: ObservableObject {
     }
 
     func loadModel(catalogId: String, contextLength: Int = 4096, gpuLayers: Int? = nil) async throws {
+        if let snapshot = await ModelStorage.shared.snapshot(name: catalogId),
+           snapshot.backendKind == .ggufLlama,
+           !snapshot.isValidatedRunnable
+        {
+            let refreshedSnapshot = await ModelStorage.shared.validateModel(catalogId: snapshot.catalogId) ?? snapshot
+            guard refreshedSnapshot.isValidatedRunnable else {
+                throw ModelError.backendUnavailable(
+                    refreshedSnapshot.validationSummary
+                        ?? "This GGUF model failed validation on this device and cannot be loaded for chat."
+                )
+            }
+        }
+
         let settings = AppSettings.shared
         let runtime = RuntimePreferences(
             contextLength: max(contextLength, 512),
@@ -55,6 +68,10 @@ final class ModelRunner: ObservableObject {
         await updateActiveState(from: entry)
     }
 
+    func validateModel(catalogId: String) async -> ModelSnapshot? {
+        await ModelStorage.shared.validateModel(catalogId: catalogId)
+    }
+
     func unloadModel() {
         Task {
             await RuntimeCoordinator.shared.unloadModel()
@@ -66,6 +83,8 @@ final class ModelRunner: ObservableObject {
         prompt: String,
         systemPrompt: String? = nil,
         conversationTurns: [ConversationTurn] = [],
+        tools: [InferenceToolDefinition] = [],
+        reasoning: InferenceReasoningOptions? = nil,
         parameters: ModelParameters = .appDefault,
         onToken: @escaping (String) -> Void
     ) async throws -> GenerationResult {
@@ -87,6 +106,8 @@ final class ModelRunner: ObservableObject {
                 prompt: prompt,
                 systemPrompt: systemPrompt,
                 conversationTurns: conversationTurns,
+                tools: tools,
+                reasoning: reasoning,
                 parameters: parameters,
                 runtimePreferences: runtime
             )

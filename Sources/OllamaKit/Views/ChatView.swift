@@ -21,7 +21,13 @@ struct ChatView: View {
     }
 
     private var downloadedModelRevision: [String] {
-        modelStore.selectionSnapshots.map { "\($0.catalogId)|\($0.modelId)|\($0.localPath)|\($0.packageRootPath)" }
+        modelStore.selectionSnapshots.map {
+            "\($0.catalogId)|\($0.modelId)|\($0.localPath)|\($0.packageRootPath)|\($0.effectiveValidationStatus.rawValue)|\($0.isValidatedRunnable)|\($0.canBeSelectedForChat)"
+        } + ["apple:\(BuiltInModelCatalog.availability().isAvailable)"]
+    }
+
+    private var selectableModels: [ModelSnapshot] {
+        BuiltInModelCatalog.selectionModels(downloadedModels: modelStore.selectionSnapshots)
     }
 
     var body: some View {
@@ -245,6 +251,24 @@ struct ChatView: View {
         if let matchingModel = BuiltInModelCatalog.resolveStoredReference(session.modelId, in: modelStore.selectionSnapshots) {
             if viewModel.currentModel?.id != matchingModel.id {
                 viewModel.currentModel = matchingModel
+            }
+            return
+        }
+
+        if !AppSettings.shared.defaultModelId.isEmpty,
+           let defaultModel = BuiltInModelCatalog.resolveStoredReference(
+                AppSettings.shared.defaultModelId,
+                in: modelStore.selectionSnapshots
+           ) {
+            if viewModel.currentModel?.id != defaultModel.id {
+                viewModel.currentModel = defaultModel
+            }
+            return
+        }
+
+        if let fallbackModel = selectableModels.first {
+            if viewModel.currentModel?.id != fallbackModel.id {
+                viewModel.currentModel = fallbackModel
             }
             return
         }
@@ -513,7 +537,7 @@ class ChatViewModel: ObservableObject {
     
     func sendMessage(_ content: String, in session: ChatSession, context: ModelContext) async {
         guard let model = currentModel else {
-            errorMessage = "No model selected"
+            errorMessage = "No runnable model is selected. Pick another validated model or re-download the missing one."
             Task { @MainActor in
                 HapticManager.notification(.error)
             }

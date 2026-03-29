@@ -41,6 +41,44 @@ public actor RuntimeCoordinator {
         return try await registry.resolve(reference: activeCatalogIdValue, contextLength: contextLength)
     }
 
+    public func validateModel(
+        catalogId: String,
+        runtime: RuntimePreferences
+    ) async throws -> ModelValidationOutcome {
+        guard let entry = try await registry.resolve(reference: catalogId, contextLength: runtime.contextLength) else {
+            throw InferenceError.registryFailure("The selected model could not be found in the registry.")
+        }
+
+        let compatibility = await capabilityService.compatibility(for: entry)
+        guard compatibility.isUsable else {
+            return ModelValidationOutcome(status: .failed, message: compatibility.message)
+        }
+
+        switch entry.backendKind {
+        case .ggufLlama:
+            if activeCatalogIdValue == entry.catalogId, activeBackendKind == .ggufLlama {
+                return ModelValidationOutcome(status: .validated, message: "This GGUF model is already loaded and responding on this device.")
+            }
+
+            do {
+                try await ggufBackend.validate(entry: entry, runtime: runtime)
+                return ModelValidationOutcome(status: .validated, message: "Validated a local GGUF load with conservative runtime settings.")
+            } catch {
+                return ModelValidationOutcome(status: .failed, message: error.localizedDescription)
+            }
+        case .coreMLPackage:
+            return ModelValidationOutcome(
+                status: .validated,
+                message: compatibility.message
+            )
+        case .appleFoundation:
+            return ModelValidationOutcome(
+                status: .validated,
+                message: compatibility.message
+            )
+        }
+    }
+
     @discardableResult
     public func loadModel(catalogId: String, runtime: RuntimePreferences) async throws -> ModelCatalogEntry {
         guard let entry = try await registry.resolve(reference: catalogId, contextLength: runtime.contextLength) else {

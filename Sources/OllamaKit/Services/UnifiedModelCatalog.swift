@@ -37,7 +37,11 @@ struct ModelSnapshot: Identifiable, Hashable, Sendable {
     let contextLength: Int
     let importSource: ModelImportSource
     let isServerExposed: Bool
+    let validationStatus: ModelValidationStatus?
+    let validationMessage: String?
+    let validatedAt: Date?
     let aliases: [String]
+    let serverCapabilities: ServerModelCapabilities?
 
     init(entry: ModelCatalogEntry) {
         self.catalogId = entry.catalogId
@@ -55,7 +59,11 @@ struct ModelSnapshot: Identifiable, Hashable, Sendable {
         self.contextLength = entry.capabilitySummary.contextLength
         self.importSource = entry.importSource
         self.isServerExposed = entry.isServerExposed
+        self.validationStatus = entry.validationStatus
+        self.validationMessage = entry.validationMessage
+        self.validatedAt = entry.validatedAt
         self.aliases = entry.aliases
+        self.serverCapabilities = entry.serverCapabilities
     }
 
     var id: String { catalogId }
@@ -104,6 +112,99 @@ struct ModelSnapshot: Identifiable, Hashable, Sendable {
 
     var hasRunnableCoreMLPayload: Bool {
         backendKind == .coreMLPackage && CoreMLPackageLocator.looksRunnable(packageRootPath: packageRootPath)
+    }
+
+    var effectiveValidationStatus: ModelValidationStatus {
+        if let validationStatus {
+            return validationStatus
+        }
+
+        switch backendKind {
+        case .ggufLlama:
+            return .unknown
+        case .appleFoundation, .coreMLPackage:
+            return .validated
+        }
+    }
+
+    var isValidatedRunnable: Bool {
+        switch backendKind {
+        case .ggufLlama:
+            return fileExists && effectiveValidationStatus.isRunnable
+        case .coreMLPackage:
+            return hasRunnableCoreMLPayload
+        case .appleFoundation:
+            return effectiveValidationStatus.isRunnable
+        }
+    }
+
+    var needsValidation: Bool {
+        backendKind == .ggufLlama && effectiveValidationStatus != .validated
+    }
+
+    var isServerRunnable: Bool {
+        isServerExposed && isValidatedRunnable
+    }
+
+    var canBeSelectedForChat: Bool {
+        switch backendKind {
+        case .ggufLlama:
+            return fileExists && isValidatedRunnable
+        case .appleFoundation:
+            return true
+        case .coreMLPackage:
+            return hasRunnableCoreMLPayload
+        }
+    }
+
+    var validationSummary: String? {
+        validationMessage?.nonEmpty
+    }
+
+    var effectiveServerCapabilities: ServerModelCapabilities {
+        serverCapabilities
+            ?? ServerModelCapabilities.conservativeDefaults(
+                backendKind: backendKind,
+                sourceModelID: sourceModelID,
+                displayName: displayName,
+                capabilitySummary: ModelCapabilitySummary(
+                    sizeBytes: size,
+                    quantization: quantization,
+                    parameterCountLabel: parameters,
+                    contextLength: contextLength,
+                    supportsStreaming: backendKind != .appleFoundation,
+                    notes: validationMessage
+                )
+            )
+    }
+
+    var conservativeAgentCapabilities: ModelAgentCapabilityProfile {
+        ModelAgentCapabilityProfile.conservativeDefaults(
+            backendKind: backendKind,
+            sourceModelID: sourceModelID,
+            displayName: displayName,
+            capabilitySummary: ModelCapabilitySummary(
+                sizeBytes: size,
+                quantization: quantization,
+                parameterCountLabel: parameters,
+                contextLength: contextLength,
+                supportsStreaming: backendKind != .appleFoundation,
+                notes: validationMessage
+            ),
+            serverCapabilities: effectiveServerCapabilities
+        )
+    }
+
+    var configuredAgentCapabilityOverride: ModelAgentCapabilityOverride? {
+        AppSettings.shared.agentCapabilityOverride(for: catalogId)
+    }
+
+    var hasAgentCapabilityOverride: Bool {
+        configuredAgentCapabilityOverride?.isEmpty == false
+    }
+
+    var effectiveAgentCapabilities: ModelAgentCapabilityProfile {
+        conservativeAgentCapabilities.applying(configuredAgentCapabilityOverride)
     }
 
     func matchesStoredReference(_ candidate: String) -> Bool {
@@ -223,6 +324,7 @@ final class ModelStorage: ObservableObject {
     func bootstrap() async {
         await migrateLegacyModelsIfNeeded()
         await refresh()
+        await validatePendingGGUFModels()
     }
 
     func refresh() async {
@@ -236,15 +338,17 @@ final class ModelStorage: ObservableObject {
 
     func upsertDownloadedModel(_ seed: DownloadedModelSeed) async {
         do {
-            _ = try await ModelRegistryStore.shared.registerDownloadedGGUF(
+            let entry = try await ModelRegistryStore.shared.registerDownloadedGGUF(
                 sourceModelID: seed.modelId,
                 displayName: seed.name,
                 localPath: seed.localPath,
                 size: seed.size,
                 quantization: seed.quantization,
                 parameterCountLabel: seed.parameters,
-                contextLength: seed.contextLength
+                contextLength: seed.contextLength,
+                serverCapabilities: seed.serverCapabilities
             )
+            _ = await validateModel(catalogId: entry.catalogId)
             await refresh()
         } catch {
             print("Failed to upsert downloaded model into registry: \(error)")
@@ -256,8 +360,9 @@ final class ModelStorage: ObservableObject {
             from: sourceURL,
             defaultContextLength: AppSettings.shared.defaultContextLength
         )
+        _ = await validateModel(catalogId: entry.catalogId)
         await refresh()
-        return ModelSnapshot(entry: entry)
+        return snapshot(name: entry.catalogId) ?? ModelSnapshot(entry: entry)
     }
 
     func importCoreMLPackage(from sourceURL: URL) async throws -> ModelSnapshot {
@@ -276,11 +381,13 @@ final class ModelStorage: ObservableObject {
 
     func deleteModel(catalogId: String) async -> Bool {
         do {
+            let deletedSnapshot = snapshot(name: catalogId)
             _ = try await ModelRegistryStore.shared.deleteModel(catalogId: catalogId)
             if ModelRunner.shared.activeCatalogId == catalogId {
                 ModelRunner.shared.unloadModel()
             }
-            if AppSettings.shared.defaultModelId.caseInsensitiveCompare(catalogId) == .orderedSame {
+            if let deletedSnapshot,
+               deletedSnapshot.matchesStoredReference(AppSettings.shared.defaultModelId) {
                 AppSettings.shared.defaultModelId = ""
             }
             await refresh()
@@ -291,15 +398,46 @@ final class ModelStorage: ObservableObject {
         }
     }
 
+    @discardableResult
+    func validateModel(catalogId: String) async -> ModelSnapshot? {
+        do {
+            guard let entry = try await RuntimeCoordinator.shared.resolveModelReference(
+                catalogId,
+                contextLength: AppSettings.shared.defaultContextLength
+            ) else {
+                return nil
+            }
+
+            let runtime = RuntimePreferences.validationBaseline(
+                contextLength: min(entry.runtimeContextLength, AppSettings.shared.defaultContextLength)
+            )
+            let outcome = try await RuntimeCoordinator.shared.validateModel(
+                catalogId: entry.catalogId,
+                runtime: runtime
+            )
+
+            _ = try await ModelRegistryStore.shared.updateValidation(
+                catalogId: entry.catalogId,
+                outcome: outcome
+            )
+            await refresh()
+            return snapshot(name: entry.catalogId)
+        } catch {
+            print("Failed to validate model \(catalogId): \(error)")
+            return nil
+        }
+    }
+
     func deleteAllInstalledModels() async {
         do {
             let deletedEntries = try await ModelRegistryStore.shared.deleteAllInstalledModels()
             let deletedCatalogIDs = Set(deletedEntries.map(\.catalogId))
+            let deletedSnapshots = deletedEntries.map(ModelSnapshot.init(entry:))
 
             if let activeCatalogId = ModelRunner.shared.activeCatalogId, deletedCatalogIDs.contains(activeCatalogId) {
                 ModelRunner.shared.unloadModel()
             }
-            if deletedCatalogIDs.contains(AppSettings.shared.defaultModelId) {
+            if deletedSnapshots.contains(where: { $0.matchesStoredReference(AppSettings.shared.defaultModelId) }) {
                 AppSettings.shared.defaultModelId = ""
             }
 
@@ -340,6 +478,20 @@ final class ModelStorage: ObservableObject {
             UserDefaults.standard.set(true, forKey: Self.migrationDefaultsKey)
         } catch {
             print("Failed to migrate legacy model records: \(error)")
+        }
+    }
+
+    private func validatePendingGGUFModels() async {
+        let pendingCatalogIDs = snapshots
+            .filter {
+                $0.backendKind == .ggufLlama
+                    && $0.fileExists
+                    && ($0.effectiveValidationStatus == .pending || $0.effectiveValidationStatus == .unknown)
+            }
+            .map(\.catalogId)
+
+        for catalogId in pendingCatalogIDs {
+            _ = await validateModel(catalogId: catalogId)
         }
     }
 }
